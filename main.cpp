@@ -1,5 +1,3 @@
-// Matlab MEX
-//
 // Levenberg-Marquardt Least Squares Fitting of 2D Gaussian
 //
 // [par, exitflag, residua, numiter, message] = lmfit1DgaussXSAO(par0, X, y, options);
@@ -12,83 +10,201 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "lmmin.h"
+#include "lmmin.cuh"
+
+#include <cuda.h>
+#include <builtin_types.h>
+//#include <helper_cuda_drvapi.h>
 
 #ifndef M_PI
 	#define M_PI 3.14159265358979323846
 #endif
 
-typedef struct {
-	size_t npar;		// number of function parameters to be optimized
-	size_t npts;		// number of data points
-	size_t dim;		    // data dimension
-	double *X;          // matrix of data variables; in Matlab stored as [dim x npts] 
-	double *y;          // vector of measured function values     y ~ fun(X,par)
-	double (*fun) (double *X, double *par); // fnc definition     y = fun(X,par)
-} my_data_type;
-
-inline double SQR(double x)	 { return (x*x); }
+inline FLOAT SQR(FLOAT x)	 { return (x*x); }
 inline int SQR(int x) { return (x*x); }
+
+// ------------------------------------------------------------------------
+// CUDA stuff
+// ------------------------------------------------------------------------
+CUcontext cuContext;
+
+void initCUDA()
+{
+    if(cuInit(cudaDeviceScheduleAuto) != CUDA_SUCCESS)   // initialize CUDA driver which needs to be done, since this uses the PTX modules
+        exit(1);
+
+    int deviceCount;
+    CUdevice cuDevice;
+    cuDeviceGetCount(&deviceCount);
+    cuDeviceGet(&cuDevice, 0);
+    //char name[100];
+    //cuDeviceGetName(name, 100, cuDevice);
+    //  static = cuDeviceGetAttribute(attribute, device_attribute, device);
+    cuCtxCreate(&cuContext, 0, cuDevice);
+}
+
+void cleanCUDA()
+{
+    if(cuCtxDestroy(cuContext) != CUDA_SUCCESS)
+        return; // exit? uz asi nejaky vysledky mit budu...
+}
+
+void runCUDA(const char *module, const char *function, dim3 block, dim3 grid, void **args)
+{
+    CUmodule cuModule;
+    CUfunction cuLMmin;
+    
+    int m = *((int *)args[0]), n = *((int *)args[1]);
+    unsigned int is = sizeof(int), fs = sizeof(FLOAT);
+    
+    // what exactly is this??!
+    unsigned int memsize = 0;//256+n*is+m*fs+2*m*fs+5*n*fs+m*n*fs;  // 256 for local variables
+
+    if(cuModuleLoad(&cuModule, module) != CUDA_SUCCESS)
+        exit(1);
+    
+    if(cuModuleGetFunction(&cuLMmin, cuModule, function) != CUDA_SUCCESS)
+        exit(1);
+    
+    if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, memsize, NULL, args, NULL) != CUDA_SUCCESS)
+        exit(1);
+}
+
+/* machine-dependent constants from FLOAT.h */
+#define LM_USERTOL 30*DBL_EPSILON  // workd also for single precision
+        // if I use 30*FLT_EPSILON instead, the value is relatively large and the program does not work well
+        // if needed, use 1.e-14, which works fine
+
+void lm_initialize_control(lm_control_type *control)
+{
+    control->maxcall = 100;
+    control->epsilon = LM_USERTOL;
+    control->stepbound = 100.;
+    control->ftol = LM_USERTOL;
+    control->xtol = LM_USERTOL;
+    control->gtol = LM_USERTOL;
+}
+
+
+/*** the following messages are indexed by the variable info. ***/
+
+const char *lm_infmsg[] = {
+    "fatal coding error (improper input parameters)",
+    "success (the relative error in the sum of squares is at most tol)",
+    "success (the relative error between x and the solution is at most tol)",
+    "success (both errors are at most tol)",
+    "trapped by degeneracy (fvec is orthogonal to the columns of the jacobian)"
+    "timeout (number of calls to fcn has reached maxcall*(n+1))",
+    "failure (ftol<tol: cannot reduce sum of squares any further)",
+    "failure (xtol<tol: cannot improve approximate solution any further)",
+    "failure (gtol<tol: cannot improve approximate solution any further)",
+    "exception (not enough memory)",
+    "exception (break requested within function evaluation)"
+};
+
+const char *lm_shortmsg[] = {
+    "invalid input",
+    "success (f)",
+    "success (p)",
+    "success (f,p)",
+    "degenerate",
+    "call limit",
+    "failed (f)",
+    "failed (p)",
+    "failed (o)",
+    "no memory",
+    "user break"
+};
+
+void lm_minimize(int m_dat, int n_par, FLOAT *par, lm_data_type *data, lm_control_type *control)
+{
+    initCUDA();
+
+    int n = n_par;
+    int m = m_dat;
+    int fs = sizeof(FLOAT);
+    int is = sizeof(int);
+
+    CUdeviceptr fvec, diag, fjac, qtf, wa1, wa2, wa3, wa4, ipvt;
+    
+    if((cuMemAlloc(&fvec,   m*fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&diag, n  *fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&qtf , n  *fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&fjac, n*m*fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&wa1 , n  *fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&wa2 , n  *fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&wa3 , n  *fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&wa4 ,   m*fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&ipvt, n  *is) == cudaErrorMemoryAllocation))
+    {
+	    control->info = 9;
+	    exit(9);
+    }
+
+    // Initialize host array and copy it to CUDA device
+    CUdeviceptr X, Y, A;
+    if((cuMemAlloc(&X, 2*m*fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&Y,   m*fs) == cudaErrorMemoryAllocation) ||
+       (cuMemAlloc(&A,   n*fs) == cudaErrorMemoryAllocation))
+    {
+        control->info = 9;
+	    exit(9);
+    }
+    cuMemcpyHtoD(X, data->X, 2*m*fs);
+    cuMemcpyHtoD(Y, data->y,   m*fs);
+    cuMemcpyHtoD(A, par    ,   n*fs);
+
+
+    // Perform the fit
+    //control->info = 0;
+    //control->nfev = 0;
+
+    // Do calculation on device (this goes through the modified legacy interface)
+    int maxcall = control->maxcall * (n + 1), one = 1;
+    void *args[] = { &m, &n, &A, &fvec, &(control->ftol), &(control->xtol), &(control->gtol),
+                     &maxcall, &(control->epsilon), &diag, &one, &(control->stepbound),
+                     &fjac, &ipvt, &qtf, &wa1, &wa2, &wa3, &wa4, &X, &Y };
+#ifdef _DEBUG
+    runCUDA("Debug/lmmin.ptx", "lmmin", dim3(1,1,1), dim3(1,1,1), args);
+#else
+    runCUDA("Release/lmmin.ptx", "lmmin", dim3(1,1,1), dim3(1,1,1), args);
+#endif
+
+    // Retrieve result from device and store it in host array
+    cuMemcpyDtoH(par, A, n*fs);
+
+	//if ( control->info < 0 )
+	//    control->info = 10;
+
+    // Clean up
+    cuMemFree(fvec);
+    cuMemFree(diag);
+    cuMemFree(qtf);
+    cuMemFree(fjac);
+    cuMemFree(wa1);
+    cuMemFree(wa2);
+    cuMemFree(wa3);
+    cuMemFree(wa4);
+    cuMemFree(ipvt);
+
+    cleanCUDA();
+}
 
 // ------------------------------------------------------------------------
 // Function to fit
 // ------------------------------------------------------------------------
 #define DIM 2
 #define NPAR 5
-double my_fit_function(double *X, double *par)
-{
-	return par[2] * exp(-0.5 * ( SQR((X[0]-par[0])/par[3]) + SQR((X[1]-par[1])/par[3]) )  ) + par[4];
-}
-
-// Transformation of function parameters to limit their range
-void partransf(double *parin, double *parout, size_t npar)
-{
-	parout[0] = parin[0];       // x center stays the same
-	parout[1] = parin[1];       // y center stays the same
-	parout[2] = SQR(parin[2]);  // amplitude >= 0
-	parout[3] = SQR(parin[3]);  // sigma >= 0
-	parout[4] = SQR(parin[4]);  // background >= 0
-}
-
-// Inverse transformation of function parameters
-void parinvtransf(double *parin, double *parout, size_t npar)
-{
-	parout[0] = parin[0];
-	parout[1] = parin[1];
-	parout[2] = sqrt(parin[2]);
-	parout[3] = sqrt(parin[3]);
-	parout[4] = sqrt(parin[4]);
-}
-
-// ------------------------------------------------------------------------
-// Compute residua for all data points
-// ------------------------------------------------------------------------
-void my_evaluate(double *par, int npts, double *fvec, void *data, int *info)
-{
-    my_data_type *mydata = (my_data_type *) data;
-	double	*y = mydata->y, *X = mydata->X;
-	int		i;
-	double p[NPAR];
-    
-	// transform function parameters to limit their range
-	partransf(par, p, mydata->npar);
-
-	// compute the difference " F = y - fun(X, par) " for all data points
-	for (i = 0; i < npts; i++, X += mydata->dim)
-		*(fvec++) = *(y++) - mydata->fun(X, p);
-
-	*info = *info;		// to prevent a 'unused variable' warning
-}
 
 // ------------------------------------------------------------------------
 // Compute sum of residual errors
 // ------------------------------------------------------------------------
-double sumreserr(double *par, int npts, void *data)
+/*FLOAT sumreserr(FLOAT *par, int npts, void *data)
 {
-	double *fvec, *tmp, sum = 0;
+	FLOAT *fvec, *tmp, sum = 0;
 	int i;
 
-	if ((fvec = (double *) malloc(npts*sizeof(double))) == NULL)
+	if ((fvec = (FLOAT *) malloc(npts*sizeof(FLOAT))) == NULL)
 		printf("Not enough memory.\n");
 
 	my_evaluate(par, npts, fvec, data, &i);
@@ -99,7 +215,7 @@ double sumreserr(double *par, int npts, void *data)
 	free(fvec);
 	
 	return sum;
-}
+}*/
 
 // ------------------------------------------------------------------------
 // Control parameters
@@ -108,11 +224,11 @@ double sumreserr(double *par, int npts, void *data)
 struct Options
 {
 	int maxcall;
-	double epsilon;
-	double stepbound;
-	double ftol;
-	double xtol;
-	double gtol;
+	FLOAT epsilon;
+	FLOAT stepbound;
+	FLOAT ftol;
+	FLOAT xtol;
+	FLOAT gtol;
 
 	Options()
 	{	// all deactivated as defaults
@@ -131,18 +247,18 @@ void init_control_userdef(lm_control_type * control, const Options *options)
 	if(options->gtol      >= 0.0) control->gtol      = options->gtol;
 }
 
-double max(double *arr, int n)
+FLOAT max(FLOAT *arr, int n)
 {
-	double res = arr[0];
+	FLOAT res = arr[0];
 	for(int i = 1; i < n; i++)
 		if(arr[i] > res)
 			res = arr[i];
 	return res;
 }
 
-double min(double *arr, int n)
+FLOAT min(FLOAT *arr, int n)
 {
-	double res = arr[0];
+	FLOAT res = arr[0];
 	for(int i = 1; i < n; i++)
 		if(arr[i] < res)
 			res = arr[i];
@@ -152,11 +268,11 @@ double min(double *arr, int n)
 // ------------------------------------------------------------------------
 // MAIN 
 // ------------------------------------------------------------------------
-double * lmfit2DgaussXYSAO(double *par0, int npts, double *X, double *y, int ny, Options *options)
+FLOAT * lmfit2DgaussXYSAO(FLOAT *par0, int npts, FLOAT *X, FLOAT *y, int ny, Options *options)
 { 
 	lm_control_type		control;
-    my_data_type		data;
-    double				*par;
+    lm_data_type		data;
+    FLOAT				*par;
 	/*
 	// test number of input arguments
 	printf("\nLevenberg-Marquardt Least Squares Fitting of 1D Gaussian\n\n");
@@ -176,17 +292,19 @@ double * lmfit2DgaussXYSAO(double *par0, int npts, double *X, double *y, int ny,
 	printf(" Note that following parameters have limited range: sigma >= 0, amplitude >= 0, offset >= 0\n\n");
 	*/
 	// initialize I/O parameters
-	par = (double *)malloc(NPAR*sizeof(double));
+	par = (FLOAT *)malloc(NPAR*sizeof(FLOAT));
 	for(int i = 0; i < NPAR; i++)
 		par[i] = par0[i];
 
 	// initialize input data
-    data.fun = my_fit_function;
+    data.fun = NULL;
 	data.dim = DIM;
 		
 	// inverse transform of initial function parameters
 	data.npar = NPAR;
-	parinvtransf(par,par,data.npar);
+	par[2] = sqrt(par[2]);
+	par[3] = sqrt(par[3]);
+	par[4] = sqrt(par[4]);
 	
 	// get data variables   X
 	data.npts = npts;
@@ -200,22 +318,24 @@ double * lmfit2DgaussXYSAO(double *par0, int npts, double *X, double *y, int ny,
 	init_control_userdef(&control, options);
 	
     // do the fitting
-	lm_minimize(data.npts, data.npar, par, my_evaluate, NULL, &data, &control);
+	lm_minimize(data.npts, data.npar, par, &data, &control);
 
 	// residual error 
-	double reserr = sumreserr(par, data.npts, &data);
+	//FLOAT reserr = sumreserr(par, data.npts, &data);
 
 	// exit flag
-	int exitflag = control.info;
+	//int exitflag = control.info;
 
 	// # iterations
-	int iter = control.nfev;
+	//int iter = control.nfev;
 
 	// message
-	const char *message = lm_infmsg[control.info];
+	//const char *message = lm_infmsg[control.info];
 
 	// get function parameters - use transformation again
-	partransf(par, par, data.npar);
+	par[2] = SQR(par[2]);
+	par[3] = SQR(par[3]);
+	par[4] = SQR(par[4]);
 
 	return par;
 }
@@ -226,7 +346,7 @@ int main()
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);
-	double im[] =	// fitregionsize2
+	FLOAT im[] =	// fitregionsize2
 	{
 		176, 159, 177, 200, 157, 183, 179, 169, 185, 167, 182,
 		176, 158, 173, 190, 202, 205, 174, 179, 178, 174, 167,
@@ -245,18 +365,18 @@ int main()
 	// ---------- START ----------------//
 	assert(fitregionsize % 2 == 1);	// TODO: replace by Java exception
 
-	double *a0 = (double *)malloc(5*sizeof(double));
-	a0[0] = 0; a0[1] = 0; a0[3] = 1.6; a0[4] = min(im,fitregionsize2); a0[2] = max(im,fitregionsize2)-a0[4];	// initial parameters
+	FLOAT *a0 = (FLOAT *)malloc(5*sizeof(FLOAT));
+	a0[0] = 0; a0[1] = 0; a0[3] = 1.6f; a0[4] = min(im,fitregionsize2); a0[2] = max(im,fitregionsize2)-a0[4];	// initial parameters
 	
 	// <--[static]
-	double *X = (double *)malloc(2*fitregionsize2*sizeof(double));
+	FLOAT *X = (FLOAT *)malloc(2*fitregionsize2*sizeof(FLOAT));
 	for(int i = -boxsize, idx = 0; i <= +boxsize; i++)
 		for(int j = -boxsize; j <= +boxsize; j++)
-			{ X[idx++] = i; X[idx++] = j; }
+			{ X[idx++] = (FLOAT)i; X[idx++] = (FLOAT)j; }
 	// [static]-->
 	
 	Options options;	// [static]
-	double *a = lmfit2DgaussXYSAO(a0, fitregionsize2, X, im, fitregionsize2, &options);
+	FLOAT *a = lmfit2DgaussXYSAO(a0, fitregionsize2, X, im, fitregionsize2, &options);
 	//[a,chi2,exitflag] = lmfit2DgaussXYSAO(a0,reshape(X(:),npts,2)', im(:)');
 	// TODO: I should be able to recieve chi2 if i want to
 	// if exitflag != ok then throw new JavaException(message);
