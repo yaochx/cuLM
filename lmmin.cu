@@ -84,17 +84,39 @@ __device__ FLOAT lm_enorm(int, FLOAT *);
 
 /***** the low-level legacy interface for full control. *****/
 __device__ void
-lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
+lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
          FLOAT xtol, FLOAT gtol, int maxfev, FLOAT epsfcn,
-	     FLOAT *diag, int mode, FLOAT factor,
-	     FLOAT *fjac, int *ipvt, FLOAT *qtf, FLOAT *wa1,
-	     FLOAT *wa2, FLOAT *wa3, FLOAT *wa4,
-         FLOAT *dataX, FLOAT *dataY, int NMOLECULES)
+	     int mode, FLOAT factor, FLOAT *g_dataX, FLOAT *g_dataY)
 {
     // TI = ThreadIndex
     // all threads are independant of each other
     int TI = blockIdx.x * blockDim.x + threadIdx.x;
-    if(TI >= NMOLECULES) return;
+    if(TI >= TI_MAX) return;
+
+    // these two are here because of the macros in lmmin.cuh
+    int n_params = n;
+    int n_input_data = m;
+
+    extern __shared__ FLOAT memory[];
+    
+    FLOAT *dataX = memory;
+    FLOAT *dataY = dataX + blockDim.x*DATAX_SIZE*FSIZE;
+    FLOAT *x     = dataY + blockDim.x*DATAY_SIZE*FSIZE;
+    FLOAT *fvec  = x     + blockDim.x*DATAA_SIZE*FSIZE;
+    FLOAT *diag  = fvec  + blockDim.x* FVEC_SIZE*FSIZE;
+    FLOAT *fjac  = diag  + blockDim.x* DIAG_SIZE*FSIZE;
+    FLOAT *qtf   = fjac  + blockDim.x* FJAC_SIZE*FSIZE;
+    FLOAT *wa1   = qtf   + blockDim.x*  QTF_SIZE*FSIZE;
+    FLOAT *wa2   = wa1   + blockDim.x*  WA1_SIZE*FSIZE;
+    FLOAT *wa3   = wa2   + blockDim.x*  WA2_SIZE*FSIZE;
+    FLOAT *wa4   = wa3   + blockDim.x*  WA3_SIZE*FSIZE;
+    int *ipvt = (int *)(wa4 + blockDim.x*WA4_SIZE*FSIZE);
+
+    // TODO: udelat dale ve funkci to adresovani tak sikovne, aby byl zarizenej i coallescing! takze aby fvec[0] byl na adresach [0:threadIdx.x]
+    // TODO: zkopirovat dataX,Y,A z globalni pameti do sdileny!
+    // TODO: ty data by mely byt vygenerovany uz rovnou ve spravnym formatu na CPU, jinak ztracim ca, ne? radsi otestovat...nejdriv kopirovat na GPU a pak zkusit prepsat na CPU a zmerit
+    //fvec[i * blockDim.x + threadIdx.x]
+
 /*
  *   The purpose of lmdif is to minimize the sum of the squares of
  *   m nonlinear functions in n variables by a modification of
@@ -276,8 +298,6 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 	prered, ratio, step, sum, temp, temp1, temp2, temp3, xnorm;
     FLOAT p1 = 0.1;
     FLOAT p0001 = 1.0e-4;
-    int n_params = n;
-    int n_input_data = m;
 
     int info = 0;
     int nfev = 0;       /* function evaluation counter */
@@ -1130,9 +1150,8 @@ __device__ FLOAT lm_enorm(int n, FLOAT *x)
 // C wrapper around our template kernel
 //
 extern "C" __global__ void
-lmmin(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol, FLOAT xtol, FLOAT gtol, int maxfev,
-      FLOAT epsfcn, FLOAT *diag, int mode, FLOAT factor, FLOAT *fjac, int *ipvt, FLOAT *qtf,
-      FLOAT *wa1, FLOAT *wa2, FLOAT *wa3, FLOAT *wa4, FLOAT *dataX, FLOAT *dataY, int NMOLECULES)
+lmmin(int nthreads, int ndata, int nparams, FLOAT *params, FLOAT ftol, FLOAT xtol, FLOAT gtol, int maxfev,
+      FLOAT epsfcn, int mode, FLOAT factor, FLOAT *dataX, FLOAT *dataY)
 {
-    lm_lmdif(m, n, x, fvec, ftol, xtol, gtol, maxfev, epsfcn, diag, mode, factor, fjac, ipvt, qtf, wa1, wa2, wa3, wa4, dataX, dataY, NMOLECULES);
+    lm_lmdif(nthreads, ndata, nparams, params, ftol, xtol, gtol, maxfev, epsfcn, mode, factor, dataX, dataY);
 }
