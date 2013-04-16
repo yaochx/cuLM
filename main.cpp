@@ -16,10 +16,6 @@
 #include <builtin_types.h>
 //#include <helper_cuda_drvapi.h>
 
-#ifndef M_PI
-	#define M_PI 3.14159265358979323846
-#endif
-
 inline FLOAT SQR(FLOAT x)	 { return (x*x); }
 inline int SQR(int x) { return (x*x); }
 
@@ -54,24 +50,18 @@ void runCUDA(const char *module, const char *function, dim3 block, dim3 grid, vo
     CUmodule cuModule;
     CUfunction cuLMmin;
     
-    int m = *((int *)args[0]), n = *((int *)args[1]);
-    unsigned int is = sizeof(int), fs = sizeof(FLOAT);
-    
-    // what exactly is this??!
-    unsigned int memsize = 0;//256+n*is+m*fs+2*m*fs+5*n*fs+m*n*fs;  // 256 for local variables
-
     if(cuModuleLoad(&cuModule, module) != CUDA_SUCCESS)
         exit(1);
     
     if(cuModuleGetFunction(&cuLMmin, cuModule, function) != CUDA_SUCCESS)
         exit(1);
     
-    if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, memsize, NULL, args, NULL) != CUDA_SUCCESS)
+    if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 0, NULL, args, NULL) != CUDA_SUCCESS)
         exit(1);
 }
 
 /* machine-dependent constants from FLOAT.h */
-#define LM_USERTOL 30*DBL_EPSILON  // workd also for single precision
+#define LM_USERTOL 30*DBL_EPSILON  // works also for single precision
         // if I use 30*FLT_EPSILON instead, the value is relatively large and the program does not work well
         // if needed, use 1.e-14, which works fine
 
@@ -85,109 +75,77 @@ void lm_initialize_control(lm_control_type *control)
     control->gtol = LM_USERTOL;
 }
 
-
-/*** the following messages are indexed by the variable info. ***/
-
-const char *lm_infmsg[] = {
-    "fatal coding error (improper input parameters)",
-    "success (the relative error in the sum of squares is at most tol)",
-    "success (the relative error between x and the solution is at most tol)",
-    "success (both errors are at most tol)",
-    "trapped by degeneracy (fvec is orthogonal to the columns of the jacobian)"
-    "timeout (number of calls to fcn has reached maxcall*(n+1))",
-    "failure (ftol<tol: cannot reduce sum of squares any further)",
-    "failure (xtol<tol: cannot improve approximate solution any further)",
-    "failure (gtol<tol: cannot improve approximate solution any further)",
-    "exception (not enough memory)",
-    "exception (break requested within function evaluation)"
-};
-
-const char *lm_shortmsg[] = {
-    "invalid input",
-    "success (f)",
-    "success (p)",
-    "success (f,p)",
-    "degenerate",
-    "call limit",
-    "failed (f)",
-    "failed (p)",
-    "failed (o)",
-    "no memory",
-    "user break"
-};
-
-void lm_minimize(int m_dat, int n_par, FLOAT *par, lm_data_type *data, lm_control_type *control)
+FLOAT ** lm_minimize(int n_molecules, int m_dat, int n_par, FLOAT *par, lm_data_type *data, lm_control_type *control)
 {
+    const int NMOLECULES = n_molecules;
+    const int FSIZE = sizeof(FLOAT);
+
     initCUDA();
 
     int n = n_par;
     int m = m_dat;
-    int fs = sizeof(FLOAT);
-    int is = sizeof(int);
-
-    CUdeviceptr fvec, diag, fjac, qtf, wa1, wa2, wa3, wa4, ipvt;
     
-    if((cuMemAlloc(&fvec,   m*fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&diag, n  *fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&qtf , n  *fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&fjac, n*m*fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&wa1 , n  *fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&wa2 , n  *fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&wa3 , n  *fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&wa4 ,   m*fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&ipvt, n  *is) == cudaErrorMemoryAllocation))
+    CUdeviceptr memory;
+    if((cuMemAlloc(&memory, BLOCK_SIZE*FSIZE*NMOLECULES) == cudaErrorMemoryAllocation))
     {
 	    control->info = 9;
 	    exit(9);
     }
 
+    // Calculate the base addresses of each vector/matrix.
+    CUdeviceptr X, Y, A, fvec, diag, fjac, qtf, wa1, wa2, wa3, wa4, ipvt;
+    X    = memory;
+    Y    = X    + (DATAX_SIZE*NMOLECULES*FSIZE);
+    A    = Y    + (DATAY_SIZE*NMOLECULES*FSIZE);
+    fvec = A    + (DATAA_SIZE*NMOLECULES*FSIZE);
+    diag = fvec + ( FVEC_SIZE*NMOLECULES*FSIZE);
+    fjac = diag + ( DIAG_SIZE*NMOLECULES*FSIZE);
+    qtf  = fjac + ( FJAC_SIZE*NMOLECULES*FSIZE);
+    wa1  = qtf  + (  QTF_SIZE*NMOLECULES*FSIZE);
+    wa2  = wa1  + (  WA1_SIZE*NMOLECULES*FSIZE);
+    wa3  = wa2  + (  WA2_SIZE*NMOLECULES*FSIZE);
+    wa4  = wa3  + (  WA3_SIZE*NMOLECULES*FSIZE);
+    ipvt = wa4  + (  WA4_SIZE*NMOLECULES*FSIZE);
+
     // Initialize host array and copy it to CUDA device
-    CUdeviceptr X, Y, A;
-    if((cuMemAlloc(&X, 2*m*fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&Y,   m*fs) == cudaErrorMemoryAllocation) ||
-       (cuMemAlloc(&A,   n*fs) == cudaErrorMemoryAllocation))
+    for(int i = 0; i < NMOLECULES; i++)
     {
-        control->info = 9;
-	    exit(9);
+        cuMemcpyHtoD(X+i*(DATAX_SIZE*FSIZE), data->X, DATAX_SIZE*FSIZE);
+        cuMemcpyHtoD(Y+i*(DATAY_SIZE*FSIZE), data->y, DATAY_SIZE*FSIZE);
+        cuMemcpyHtoD(A+i*(DATAA_SIZE*FSIZE), par    , DATAA_SIZE*FSIZE);
     }
-    cuMemcpyHtoD(X, data->X, 2*m*fs);
-    cuMemcpyHtoD(Y, data->y,   m*fs);
-    cuMemcpyHtoD(A, par    ,   n*fs);
 
-
-    // Perform the fit
-    //control->info = 0;
-    //control->nfev = 0;
 
     // Do calculation on device (this goes through the modified legacy interface)
     int maxcall = control->maxcall * (n + 1), one = 1;
     void *args[] = { &m, &n, &A, &fvec, &(control->ftol), &(control->xtol), &(control->gtol),
                      &maxcall, &(control->epsilon), &diag, &one, &(control->stepbound),
-                     &fjac, &ipvt, &qtf, &wa1, &wa2, &wa3, &wa4, &X, &Y };
+                     &fjac, &ipvt, &qtf, &wa1, &wa2, &wa3, &wa4, &X, &Y, (void *)&NMOLECULES };
+
+    // working in 1D only ... there is only 48kB od shared memory per block, thus with arrays of length 1248, it is possible to run 4 threads with double precision (8B per item) or 8 threads with single precision (4B per item)
+    int blockX = 32 / FSIZE;
+    int nblocks = (NMOLECULES / blockX) + (int)(NMOLECULES % blockX > 0);    // --> ceil(NMOLECULES / blockX)
+
+    // run
 #ifdef _DEBUG
-    runCUDA("Debug/lmmin.ptx", "lmmin", dim3(1,1,1), dim3(1,1,1), args);
+    runCUDA("Debug/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), args);
 #else
-    runCUDA("Release/lmmin.ptx", "lmmin", dim3(1,1,1), dim3(1,1,1), args);
+    runCUDA("Release/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), args);
 #endif
 
     // Retrieve result from device and store it in host array
-    cuMemcpyDtoH(par, A, n*fs);
-
-	//if ( control->info < 0 )
-	//    control->info = 10;
-
-    // Clean up
-    cuMemFree(fvec);
-    cuMemFree(diag);
-    cuMemFree(qtf);
-    cuMemFree(fjac);
-    cuMemFree(wa1);
-    cuMemFree(wa2);
-    cuMemFree(wa3);
-    cuMemFree(wa4);
-    cuMemFree(ipvt);
-
+    FLOAT **results = new FLOAT*[NMOLECULES];
+    for(int i = 0; i < NMOLECULES; i++)
+    {
+        results[i] = new FLOAT[DATAA_SIZE];
+        cuMemcpyDtoH(results[i], A+i*(DATAA_SIZE*FSIZE), DATAA_SIZE*FSIZE);
+    }
+    
+	// Clean up
+    cuMemFree(memory);
     cleanCUDA();
+
+    return results;
 }
 
 // ------------------------------------------------------------------------
@@ -195,27 +153,6 @@ void lm_minimize(int m_dat, int n_par, FLOAT *par, lm_data_type *data, lm_contro
 // ------------------------------------------------------------------------
 #define DIM 2
 #define NPAR 5
-
-// ------------------------------------------------------------------------
-// Compute sum of residual errors
-// ------------------------------------------------------------------------
-/*FLOAT sumreserr(FLOAT *par, int npts, void *data)
-{
-	FLOAT *fvec, *tmp, sum = 0;
-	int i;
-
-	if ((fvec = (FLOAT *) malloc(npts*sizeof(FLOAT))) == NULL)
-		printf("Not enough memory.\n");
-
-	my_evaluate(par, npts, fvec, data, &i);
-
-	for(i = 0, tmp = fvec; i < npts; i++)
-		sum += SQR(*tmp++);
-	
-	free(fvec);
-	
-	return sum;
-}*/
 
 // ------------------------------------------------------------------------
 // Control parameters
@@ -268,7 +205,7 @@ FLOAT min(FLOAT *arr, int n)
 // ------------------------------------------------------------------------
 // MAIN 
 // ------------------------------------------------------------------------
-FLOAT * lmfit2DgaussXYSAO(FLOAT *par0, int npts, FLOAT *X, FLOAT *y, int ny, Options *options)
+FLOAT ** lmfit2DgaussXYSAO(int n_molecules, FLOAT *par0, int npts, FLOAT *X, FLOAT *y, int ny, Options *options)
 { 
 	lm_control_type		control;
     lm_data_type		data;
@@ -318,9 +255,16 @@ FLOAT * lmfit2DgaussXYSAO(FLOAT *par0, int npts, FLOAT *X, FLOAT *y, int ny, Opt
 	init_control_userdef(&control, options);
 	
     // do the fitting
-	lm_minimize(data.npts, data.npar, par, &data, &control);
-
-	// residual error 
+	FLOAT ** res = lm_minimize(n_molecules, data.npts, data.npar, par, &data, &control);
+	for(int i = 0; i < n_molecules; i++)
+    {
+        // get function parameters - use transformation again
+	    res[i][2] = SQR(res[i][2]);
+	    res[i][3] = SQR(res[i][3]);
+	    res[i][4] = SQR(res[i][4]);
+    }
+    
+    // residual error 
 	//FLOAT reserr = sumreserr(par, data.npts, &data);
 
 	// exit flag
@@ -332,12 +276,7 @@ FLOAT * lmfit2DgaussXYSAO(FLOAT *par0, int npts, FLOAT *X, FLOAT *y, int ny, Opt
 	// message
 	//const char *message = lm_infmsg[control.info];
 
-	// get function parameters - use transformation again
-	par[2] = SQR(par[2]);
-	par[3] = SQR(par[3]);
-	par[4] = SQR(par[4]);
-
-	return par;
+	return res;
 }
 
 int main()
@@ -363,7 +302,7 @@ int main()
 
 
 	// ---------- START ----------------//
-	assert(fitregionsize % 2 == 1);	// TODO: replace by Java exception
+	assert(fitregionsize % 2 == 1);	// TODO: replace with Java exception
 
 	FLOAT *a0 = (FLOAT *)malloc(5*sizeof(FLOAT));
 	a0[0] = 0; a0[1] = 0; a0[3] = 1.6f; a0[4] = min(im,fitregionsize2); a0[2] = max(im,fitregionsize2)-a0[4];	// initial parameters
@@ -375,14 +314,15 @@ int main()
 			{ X[idx++] = (FLOAT)i; X[idx++] = (FLOAT)j; }
 	// [static]-->
 	
+    const int n_molecules = 500000;
 	Options options;	// [static]
-	FLOAT *a = lmfit2DgaussXYSAO(a0, fitregionsize2, X, im, fitregionsize2, &options);
-	//[a,chi2,exitflag] = lmfit2DgaussXYSAO(a0,reshape(X(:),npts,2)', im(:)');
+	FLOAT **a = lmfit2DgaussXYSAO(n_molecules, a0, fitregionsize2, X, im, fitregionsize2, &options);
 	// TODO: I should be able to recieve chi2 if i want to
 	// if exitflag != ok then throw new JavaException(message);
 
-	// expected results: 0.0017, 0.056, 356.73, 0.94857, 182.76
-	printf("x=%f,y=%f,I=%f,s=%f,b=%f\n",a[0],a[1],a[2],a[3],a[4]);
-
+    // expected result (with double precision): 0.0017, 0.056, 356.73, 0.94857, 182.76
+    for(int i = 0; i < n_molecules; i++)
+	    printf("x=%f,y=%f,I=%f,s=%f,b=%f\n",a[i][0],a[i][1],a[i][2],a[i][3],a[i][4]);
+    
 	return 0;
 }

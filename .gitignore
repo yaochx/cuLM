@@ -4,3 +4,5 @@ ipch/
 *.opensdf
 *.sdf
 *.suo
+cuLM.vcxproj.martin.nvuser
+vc100.pdb

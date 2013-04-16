@@ -18,25 +18,69 @@
 // precision: float/FLOAT ...float is usually at least 8x faster than FLOAT, because number of FLOAT processing units is restricted on the chip!
 #define DOUBLE_PRECISION 0
 
-#if DOUBLE_PRECISION == 0
-    #define FLOAT float
+#if DOUBLE_PRECISION == 1
+    #define LM_MACHEP     DBL_EPSILON   /* resolution of arithmetic */
+    #define LM_DWARF      DBL_MIN       /* smallest nonzero number */
+    #define LM_SQRT_DWARF sqrt(DBL_MIN) /* square should not underflow */
+    #define LM_SQRT_GIANT sqrt(DBL_MAX) /* square should not overflow */
+    #define FLOAT         double
+    #define BLOCK_SIZE    1248
 #else
-    #define FLOAT double
+    #define LM_MACHEP     FLT_EPSILON   /* resolution of arithmetic */
+    #define LM_DWARF      FLT_MIN       /* smallest nonzero number */
+    #define LM_SQRT_DWARF sqrt(FLT_MIN) /* square should not underflow */
+    #define LM_SQRT_GIANT sqrt(FLT_MAX) /* square should not overflow */
+    #define FLOAT         float
+    #define BLOCK_SIZE    1245
 #endif
+
+/*
+    const int BLOCK_SIZE = 2*m  // X
+                         + m    // Y
+                         + n    // A
+                         + m    // fvec
+                         + n    // diag
+                         + n    // qtf
+                         + n*m  // fjac
+                         + n    // wa1
+                         + n    // wa2
+                         + n    // wa3
+                         + m    // wa4
+                         + n;   // ipvt -> this is integer! but it is the same size as float anyway (4B)
+    
+    BLOCK_SIZE = 1245 items
+    */
+
+#define DATAX_SIZE 2*m
+#define DATAY_SIZE m
+#define DATAA_SIZE n
+#define FVEC_SIZE m
+#define DIAG_SIZE n
+#define QTF_SIZE n
+#define FJAC_SIZE n*m
+#define WA1_SIZE n
+#define WA2_SIZE n
+#define WA3_SIZE n
+#define WA4_SIZE m
+#define IPVT_SIZE n
+
+/* If the above values do not work, the following seem good for an x86:
+ LM_MACHEP     .555e-16
+ LM_DWARF      9.9e-324	
+ LM_SQRT_DWARF 1.e-160   
+ LM_SQRT_GIANT 1.e150 
+ LM_USER_TOL   1.e-14
+   The following values should work on any machine:
+ LM_MACHEP     1.2e-16
+ LM_DWARF      1.0e-38
+ LM_SQRT_DWARF 3.834e-20
+ LM_SQRT_GIANT 1.304e19
+ LM_USER_TOL   1.e-14
+*/
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-
-/** Default data type for passing y(t) data to lm_evaluate **/
-
-typedef struct {
-    FLOAT *tvec;
-    FLOAT *yvec;
-    FLOAT (*f) (FLOAT t, FLOAT *par);
-} lm_data_type_default;
-
 
 /** Compact high-level interface. **/
 
@@ -69,8 +113,6 @@ void lm_initialize_control(lm_control_type * control);
 /* The actual minimization. */
 void lm_minimize(int m_dat, int n_par, FLOAT *par, lm_data_type *data, lm_control_type *control);
 
-extern const char *lm_infmsg[];
-extern const char *lm_shortmsg[];
 
 #ifdef __cplusplus
 }

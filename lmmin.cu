@@ -20,54 +20,27 @@
  * Make:     For instance: gcc -c lmmin.c; ar rc liblmmin.a lmmin.o
  */
  
-
 #include <stdlib.h>
 #include <math.h>
 #include <float.h>
 #include "lmmin.cuh"
-#define _LMDIF
 
-#if DOUBLE_PRECISION == 1
-    #define LM_MACHEP     DBL_EPSILON   /* resolution of arithmetic */
-    #define LM_DWARF      DBL_MIN       /* smallest nonzero number */
-    #define LM_SQRT_DWARF sqrt(DBL_MIN) /* square should not underflow */
-    #define LM_SQRT_GIANT sqrt(DBL_MAX) /* square should not overflow */
-#else
-    #define LM_MACHEP     FLT_EPSILON   /* resolution of arithmetic */
-    #define LM_DWARF      FLT_MIN       /* smallest nonzero number */
-    #define LM_SQRT_DWARF sqrt(FLT_MIN) /* square should not underflow */
-    #define LM_SQRT_GIANT sqrt(FLT_MAX) /* square should not overflow */
-#endif
-/* If the above values do not work, the following seem good for an x86:
- LM_MACHEP     .555e-16
- LM_DWARF      9.9e-324	
- LM_SQRT_DWARF 1.e-160   
- LM_SQRT_GIANT 1.e150 
- LM_USER_TOL   1.e-14
-   The following values should work on any machine:
- LM_MACHEP     1.2e-16
- LM_DWARF      1.0e-38
- LM_SQRT_DWARF 3.834e-20
- LM_SQRT_GIANT 1.304e19
- LM_USER_TOL   1.e-14
-*/
-
-
+/* *************************** simple macros ******************************* */
+#define MIN(a,b) (((a)<=(b)) ? (a) : (b))
+#define MAX(a,b) (((a)>=(b)) ? (a) : (b))
 #define SQR(x)   (x)*(x)
 
 /* ******************* fitting a 2D symmetric gaussian ********************* */
 #define DIM 2
 #define NPAR 5
 
-__device__ __host__
-FLOAT gaussian(FLOAT *X, FLOAT *par)
+__device__ __host__ FLOAT gaussian(FLOAT *X, FLOAT *par)
 {
 	return par[2] * exp(-0.5f * ( SQR((X[0]-par[0])/par[3]) + SQR((X[1]-par[1])/par[3]) )  ) + par[4];
 }
 
 // Transformation of function parameters to limit their range
-__device__ __host__
-void partransf(FLOAT *parin, FLOAT *parout, size_t npar)
+__device__ __host__ void partransf(FLOAT *parin, FLOAT *parout, size_t npar)
 {
 	parout[0] = parin[0];       // x center stays the same
 	parout[1] = parin[1];       // y center stays the same
@@ -77,8 +50,7 @@ void partransf(FLOAT *parin, FLOAT *parout, size_t npar)
 }
 
 // Inverse transformation of function parameters
-__device__ __host__
-void parinvtransf(FLOAT *parin, FLOAT *parout, size_t npar)
+__device__ __host__ void parinvtransf(FLOAT *parin, FLOAT *parout, size_t npar)
 {
 	parout[0] = parin[0];
 	parout[1] = parin[1];
@@ -87,8 +59,7 @@ void parinvtransf(FLOAT *parin, FLOAT *parout, size_t npar)
 	parout[4] = sqrt(parin[4]);
 }
 
-__device__ __host__
-void evaluate(FLOAT *par, int npts, FLOAT *fvec, FLOAT *X, FLOAT *y)
+__device__ __host__ void evaluate(FLOAT *par, int npts, FLOAT *fvec, FLOAT *X, FLOAT *y)
 {
 	int	   i;
 	FLOAT p[NPAR];
@@ -110,20 +81,20 @@ __device__ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag, FLOA
 __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag, FLOAT *qtb, FLOAT delta, FLOAT *par, FLOAT *x, FLOAT *sdiag, FLOAT *wa1, FLOAT *wa2);
 __device__ FLOAT lm_enorm(int, FLOAT *);
 
-#define MIN(a,b) (((a)<=(b)) ? (a) : (b))
-#define MAX(a,b) (((a)>=(b)) ? (a) : (b))
-//#define SQR(x)   (x)*(x)
-
 
 /***** the low-level legacy interface for full control. *****/
-template <int block_size> __device__ void
+__device__ void
 lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
          FLOAT xtol, FLOAT gtol, int maxfev, FLOAT epsfcn,
-	     FLOAT *diag, int mode, FLOAT factor, /*int *info, int *nfev,*/
+	     FLOAT *diag, int mode, FLOAT factor,
 	     FLOAT *fjac, int *ipvt, FLOAT *qtf, FLOAT *wa1,
 	     FLOAT *wa2, FLOAT *wa3, FLOAT *wa4,
-         FLOAT *dataX, FLOAT *dataY)
+         FLOAT *dataX, FLOAT *dataY, int NMOLECULES)
 {
+    // TI = ThreadIndex
+    // all threads are independant of each other
+    int TI = blockIdx.x * blockDim.x + threadIdx.x;
+    if(TI >= NMOLECULES) return;
 /*
  *   The purpose of lmdif is to minimize the sum of the squares of
  *   m nonlinear functions in n variables by a modification of
@@ -306,9 +277,8 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
     FLOAT p1 = 0.1;
     FLOAT p0001 = 1.0e-4;
 
-//    *nfev = 0;			/* function evaluation counter */
     int info = 0;
-    int nfev = 0;
+    int nfev = 0;       /* function evaluation counter */
     iter = 1;			/* outer loop counter */
     par = 0;			/* levenberg-marquardt parameter */
     delta = 0;	 /* to prevent a warning (initialization within if-clause) */
@@ -325,7 +295,7 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
     }
     if (mode == 2) {		/* scaling by diag[] */
 	    for (j = 0; j < n; j++) {	/* check for nonpositive elements */
-	        if (diag[j] <= 0.0) {
+	        if (diag[DIAG_SIZE*TI+j] <= 0.0) {
 		        info = 0;	// invalid parameter
 		        return;
 	        }
@@ -335,9 +305,9 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 /*** lmdif: evaluate function at starting point and calculate norm. ***/
 
     info = 0;
-    evaluate(x, m, fvec, dataX, dataY); ++nfev;
+    evaluate(&x[DATAA_SIZE*TI], m, &fvec[FVEC_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]); ++nfev;
     if (info < 0) return;
-    fnorm = lm_enorm(m, fvec);
+    fnorm = lm_enorm(m, &fvec[FVEC_SIZE*TI]);
 
 /*** lmdif: the outer loop. ***/
 
@@ -346,36 +316,36 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 /*** outer: calculate the jacobian matrix. ***/
 
 	for (j = 0; j < n; j++) {
-	    temp = x[j];
+	    temp = x[DATAA_SIZE*TI+j];
 	    step = eps * fabs(temp);
 	    if (step == 0.)
 		step = eps;
-	    x[j] = temp + step;
+	    x[DATAA_SIZE*TI+j] = temp + step;
 	    info = 0;
-	    evaluate(x, m, wa4, dataX, dataY);
+	    evaluate(&x[DATAA_SIZE*TI], m, &wa4[WA4_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]);
 	    if (info < 0) return;	/* user requested break */
 	    for (i = 0; i < m; i++) /* changed in 2.3, Mark Bydder */
-		    fjac[j * m + i] = (wa4[i] - fvec[i]) / (x[j] - temp);
-	    x[j] = temp;
+		    fjac[FJAC_SIZE*TI + j * m + i] = (wa4[WA4_SIZE*TI+i] - fvec[FVEC_SIZE*TI+i]) / (x[DATAA_SIZE*TI+j] - temp);
+	    x[DATAA_SIZE*TI+j] = temp;
 	}
 
 /*** outer: compute the qr factorization of the jacobian. ***/
 
-	lm_qrfac(m, n, fjac, 1, ipvt, wa1, wa2, wa3);
+	lm_qrfac(m, n, &fjac[FJAC_SIZE*TI], 1, &ipvt[IPVT_SIZE*TI], &wa1[WA1_SIZE*TI], &wa2[WA2_SIZE*TI], &wa3[WA3_SIZE*TI]);
 
 	if (iter == 1) { /* first iteration */
 	    if (mode != 2) {
                 /* diag := norms of the columns of the initial jacobian */
 		for (j = 0; j < n; j++) {
-		    diag[j] = wa2[j];
-		    if (wa2[j] == 0.)
-			diag[j] = 1.;
+		    diag[DIAG_SIZE*TI+j] = wa2[WA2_SIZE*TI+j];
+		    if (wa2[WA2_SIZE*TI+j] == 0.)
+			diag[DIAG_SIZE*TI+j] = 1.;
 		}
 	    }
             /* use diag to scale x, then calculate the norm */
 	    for (j = 0; j < n; j++)
-		wa3[j] = diag[j] * x[j];
-	    xnorm = lm_enorm(n, wa3);
+		wa3[WA3_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * x[DATAA_SIZE*TI+j];
+	    xnorm = lm_enorm(n, &wa3[WA3_SIZE*TI]);
             /* initialize the step bound delta. */
 	    delta = factor * xnorm;
 	    if (delta == 0.)
@@ -385,20 +355,20 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 /*** outer: form (q transpose)*fvec and store first n components in qtf. ***/
 
 	for (i = 0; i < m; i++)
-	    wa4[i] = fvec[i];
+	    wa4[WA4_SIZE*TI+i] = fvec[FVEC_SIZE*TI+i];
 
 	for (j = 0; j < n; j++) {
-	    temp3 = fjac[j * m + j];
+	    temp3 = fjac[FJAC_SIZE*TI + j * m + j];
 	    if (temp3 != 0.) {
 		sum = 0;
 		for (i = j; i < m; i++)
-		    sum += fjac[j * m + i] * wa4[i];
+		    sum += fjac[FJAC_SIZE*TI + j * m + i] * wa4[WA4_SIZE*TI+i];
 		temp = -sum / temp3;
 		for (i = j; i < m; i++)
-		    wa4[i] += fjac[j * m + i] * temp;
+		    wa4[WA4_SIZE*TI+i] += fjac[FJAC_SIZE*TI + j * m + i] * temp;
 	    }
-	    fjac[j * m + j] = wa1[j];
-	    qtf[j] = wa4[j];
+	    fjac[FJAC_SIZE*TI + j * m + j] = wa1[WA1_SIZE*TI+j];
+	    qtf[QTF_SIZE*TI+j] = wa4[WA4_SIZE*TI+j];
 	}
 
 /** outer: compute norm of scaled gradient and test for convergence. ***/
@@ -406,13 +376,13 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 	gnorm = 0;
 	if (fnorm != 0) {
 	    for (j = 0; j < n; j++) {
-		if (wa2[ipvt[j]] == 0)
+		if (wa2[WA2_SIZE*TI+ipvt[IPVT_SIZE*TI+j]] == 0)
 		    continue;
 
 		sum = 0.;
 		for (i = 0; i <= j; i++)
-		    sum += fjac[j * m + i] * qtf[i] / fnorm;
-		gnorm = MAX(gnorm, fabs(sum / wa2[ipvt[j]]));
+		    sum += fjac[FJAC_SIZE*TI + j * m + i] * qtf[QTF_SIZE*TI+i] / fnorm;
+		gnorm = MAX(gnorm, fabs(sum / wa2[WA2_SIZE*TI+ipvt[IPVT_SIZE*TI+j]]));
 	    }
 	}
 
@@ -425,7 +395,7 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 
 	if (mode != 2) {
 	    for (j = 0; j < n; j++)
-		diag[j] = MAX(diag[j], wa2[j]);
+		diag[DIAG_SIZE*TI+j] = MAX(diag[DIAG_SIZE*TI+j], wa2[WA2_SIZE*TI+j]);
 	}
 
 /*** the inner loop. ***/
@@ -433,17 +403,17 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 
 /*** inner: determine the levenberg-marquardt parameter. ***/
 
-	    lm_lmpar(n, fjac, m, ipvt, diag, qtf, delta, &par,
-		     wa1, wa2, wa3, wa4);
+	    lm_lmpar(n, &fjac[FJAC_SIZE*TI], m, &ipvt[IPVT_SIZE*TI], &diag[DIAG_SIZE*TI], &qtf[QTF_SIZE*TI], delta, &par,
+		     &wa1[WA1_SIZE*TI], &wa2[WA2_SIZE*TI], &wa3[WA3_SIZE*TI], &wa4[WA4_SIZE*TI]);
 
 /*** inner: store the direction p and x + p; calculate the norm of p. ***/
 
 	    for (j = 0; j < n; j++) {
-		wa1[j] = -wa1[j];
-		wa2[j] = x[j] + wa1[j];
-		wa3[j] = diag[j] * wa1[j];
+		wa1[WA1_SIZE*TI+j] = -wa1[WA1_SIZE*TI+j];
+		wa2[WA2_SIZE*TI+j] = x[DATAA_SIZE*TI+j] + wa1[WA1_SIZE*TI+j];
+		wa3[WA3_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * wa1[WA1_SIZE*TI+j];
 	    }
-	    pnorm = lm_enorm(n, wa3);
+	    pnorm = lm_enorm(n, &wa3[WA3_SIZE*TI]);
 
 /*** inner: on the first iteration, adjust the initial step bound. ***/
 
@@ -453,10 +423,10 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
             /* evaluate the function at x + p and calculate its norm. */
 
 	    info = 0;
-	    evaluate(wa2, m, wa4, dataX, dataY); ++nfev;
+	    evaluate(&wa2[WA2_SIZE*TI], m, &wa4[WA4_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]); ++nfev;
 	    if (info < 0) return; /* user requested break. */
 
-	    fnorm1 = lm_enorm(m, wa4);
+	    fnorm1 = lm_enorm(m, &wa4[WA4_SIZE*TI]);
 
 /*** inner: compute the scaled actual reduction. ***/
 
@@ -469,11 +439,11 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
      the scaled directional derivative. ***/
 
 	    for (j = 0; j < n; j++) {
-		wa3[j] = 0;
+		wa3[WA3_SIZE*TI+j] = 0;
 		for (i = 0; i <= j; i++)
-		    wa3[i] += fjac[j * m + i] * wa1[ipvt[j]];
+		    wa3[WA3_SIZE*TI+i] += fjac[FJAC_SIZE*TI+j * m + i] * wa1[WA1_SIZE*TI+ipvt[IPVT_SIZE*TI+j]];
 	    }
-	    temp1 = lm_enorm(n, wa3) / fnorm;
+	    temp1 = lm_enorm(n, &wa3[WA3_SIZE*TI]) / fnorm;
 	    temp2 = sqrt(par) * pnorm / fnorm;
 	    prered = SQR(temp1) + 2 * SQR(temp2);
 	    dirder = -(SQR(temp1) + SQR(temp2));
@@ -503,12 +473,12 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 	    if (ratio >= p0001) {
                 /* yes, success: update x, fvec, and their norms. */
 		for (j = 0; j < n; j++) {
-		    x[j] = wa2[j];
-		    wa2[j] = diag[j] * x[j];
+		    x[DATAA_SIZE*TI+j] = wa2[WA2_SIZE*TI+j];
+		    wa2[WA2_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * x[DATAA_SIZE*TI+j];
 		}
 		for (i = 0; i < m; i++)
-		    fvec[i] = wa4[i];
-		xnorm = lm_enorm(n, wa2);
+		    fvec[FVEC_SIZE*TI+i] = wa4[WA4_SIZE*TI+i];
+		xnorm = lm_enorm(n, &wa2[WA2_SIZE*TI]);
 		fnorm = fnorm1;
 		iter++;
 	    }
@@ -547,10 +517,9 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 } /*** lm_lmdif. ***/
 
 
-__device__
-void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
-	      FLOAT *qtb, FLOAT delta, FLOAT *par, FLOAT *x,
-	      FLOAT *sdiag, FLOAT *wa1, FLOAT *wa2)
+__device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
+                         FLOAT *qtb, FLOAT delta, FLOAT *par, FLOAT *x,
+                         FLOAT *sdiag, FLOAT *wa1, FLOAT *wa2)
 {
 /*     Given an m by n matrix a, an n by n nonsingular diagonal
  *     matrix d, an m-vector b, and a positive number delta,
@@ -1072,8 +1041,7 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 } /*** lm_qrsolv. ***/
 
 
-__device__
-FLOAT lm_enorm(int n, FLOAT *x)
+__device__ FLOAT lm_enorm(int n, FLOAT *x)
 {
 /*     Given an n-vector x, this function calculates the
  *     euclidean norm of x.
@@ -1156,14 +1124,13 @@ FLOAT lm_enorm(int n, FLOAT *x)
 
 
 
-
+//
 // C wrapper around our template kernel
+//
 extern "C" __global__ void
 lmmin(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol, FLOAT xtol, FLOAT gtol, int maxfev,
       FLOAT epsfcn, FLOAT *diag, int mode, FLOAT factor, FLOAT *fjac, int *ipvt, FLOAT *qtf,
-      FLOAT *wa1, FLOAT *wa2, FLOAT *wa3, FLOAT *wa4, FLOAT *dataX, FLOAT *dataY)
+      FLOAT *wa1, FLOAT *wa2, FLOAT *wa3, FLOAT *wa4, FLOAT *dataX, FLOAT *dataY, int NMOLECULES)
 {
-    // lze predavat i datovy typ, takze muzu float vs double vyresit za behu!
-    // chyba v presnosti muze byt temi parametry, ktre zadava uzivatel
-    lm_lmdif<1>(m, n, x, fvec, ftol, xtol, gtol, maxfev, epsfcn, diag, mode, factor, fjac, ipvt, qtf, wa1, wa2, wa3, wa4, dataX, dataY);
+    lm_lmdif(m, n, x, fvec, ftol, xtol, gtol, maxfev, epsfcn, diag, mode, factor, fjac, ipvt, qtf, wa1, wa2, wa3, wa4, dataX, dataY, NMOLECULES);
 }
