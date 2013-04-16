@@ -6,3 +6,4 @@ ipch/
 *.suo
 cuLM.vcxproj.martin.nvuser
 vc100.pdb
+bin/

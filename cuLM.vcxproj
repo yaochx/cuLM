@@ -91,7 +91,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="lmmin.cu">
-      <CompileOut Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(OutDir)lmmin.ptx</CompileOut>
+      <CompileOut Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)bin/lmmin.ptx</CompileOut>
       <NvccCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">ptx</NvccCompilation>
       <TargetMachinePlatform Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">32</TargetMachinePlatform>
       <NvccCompilation Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ptx</NvccCompilation>

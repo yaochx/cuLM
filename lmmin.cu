@@ -276,6 +276,8 @@ lm_lmdif(int m, int n, FLOAT *x, FLOAT *fvec, FLOAT ftol,
 	prered, ratio, step, sum, temp, temp1, temp2, temp3, xnorm;
     FLOAT p1 = 0.1;
     FLOAT p0001 = 1.0e-4;
+    int n_params = n;
+    int n_input_data = m;
 
     int info = 0;
     int nfev = 0;       /* function evaluation counter */
