@@ -1,3 +1,26 @@
+/*
+   REPORT
+    - momentalni stav: nepada to a neco to dela...ovsem krome odhadu X jsou vsechno defaultni hodnoty
+      --> muj tip je, ze je spatne CID_BASE, protoze x je prvni parametr (prvni adresa je zrejme spravne), takze to asi nebude nahoda
+
+   TODO
+    - funguje CID_BASE ve volani lmenorm tak, jak by mel?
+    - zbavit se goto!
+    - zkusit presunout ty dva cykly pro Y a A, co jsou ve funkci LMfit(main.cpp) do inicializace v lmdiff, cimz by to bylo asi cistsi, zejmena pak z javy
+    - vyber nejlepsiho zarizeni s nejvice GFlops
+    - mereni single, nebo double?
+    
+    - vytvorit tagy u verzi, kde se merilo
+    - pripadne vytvorit branch pro predchozi mereni bez pouziti shared pameti - uz ted totiz vim, ze jsem se nemusel tolik omezovat a v bloku mohlo byt vlaken hafo...
+      --> najit nejlepsi pomer bloky/vlakna zvlast pro float a double a provest mereni
+          --> pridat jeste navic coalescing, pokud to ma u globalni pameti vubec vliv..?
+          --> zkusit prepnout vic pameti do L1 cache, jak je napsano zde: https://developer.nvidia.com/content/using-shared-memory-cuda-cc, napr. cudaFuncCachePreferL1
+              --> podobne bych tomhle mohl zkusit hejbat u shared verze...staci spocitat, kolik potrebuju bajtu na lokalni promenny a volani funkci a dat to k dispozici pres L1
+
+    - Java-friendly interface v PTX
+*/
+
+
 // Levenberg-Marquardt Least Squares Fitting of 2D Gaussian
 //
 // [par, exitflag, residua, numiter, message] = lmfit1DgaussXSAO(par0, X, y, options);
@@ -71,7 +94,7 @@ class CUDA
                 throw("cuModuleGetFunction");
     
             // Invokes the kernel f on a gridDimX x gridDimY x gridDimZ grid of blocks. Each block contains blockDimX x blockDimY x blockDimZ threads.
-            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 0, NULL, args, NULL) != CUDA_SUCCESS)
+            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 8*1248*FSIZE, NULL, args, NULL) != CUDA_SUCCESS)
                 throw("cuLaunchKernel");
         }
 
@@ -98,6 +121,7 @@ class Gaussian2DFitting
     private:
         int n_params;
         int n_molecules;
+        int n_boxsize;
         int n_fitting_region;
         int n_input_data;
         
@@ -108,7 +132,7 @@ class Gaussian2DFitting
         FLOAT control_xtol;
         FLOAT control_gtol;
 
-        static inline FLOAT sqr(FLOAT x)
+        template<typename T> T sqr(T x)
         {
             return x*x;
         }
@@ -134,9 +158,10 @@ class Gaussian2DFitting
         }
 
     public:
-        Gaussian2DFitting(int fitting_region)
+        Gaussian2DFitting(int boxsize)
         {
-            n_fitting_region = fitting_region;
+            n_boxsize = boxsize;
+            n_fitting_region = 1+2*boxsize;
             n_input_data = sqr(n_fitting_region);
             n_params = 5;
 
@@ -162,62 +187,72 @@ class Gaussian2DFitting
             if(stepbound >= 0.0) control_stepbound = stepbound;
         }
 
-        FLOAT ** LMfit(int molecules, FLOAT **par0, FLOAT **X, FLOAT **y)
+        FLOAT ** LMfit(int molecules, FLOAT **par0, FLOAT **y)
         {
             n_molecules = molecules;
             TransformForwardParams(par0);
-	        
-            CUDA cuda;
-            CUdeviceptr d_memory = cuda.alloc(BLOCK_SIZE*FSIZE*n_molecules);
-
-            // Calculate the base address of each vector/matrix.
-            CUdeviceptr d_X, d_Y, d_A, d_fvec, d_diag, d_fjac, d_qtf, d_wa1, d_wa2, d_wa3, d_wa4, d_ipvt;
-            d_X    = d_memory;
-            d_Y    = d_X    + (DATAX_SIZE*n_molecules*FSIZE);
-            d_A    = d_Y    + (DATAY_SIZE*n_molecules*FSIZE);
-            d_fvec = d_A    + (DATAA_SIZE*n_molecules*FSIZE);
-            d_diag = d_fvec + ( FVEC_SIZE*n_molecules*FSIZE);
-            d_fjac = d_diag + ( DIAG_SIZE*n_molecules*FSIZE);
-            d_qtf  = d_fjac + ( FJAC_SIZE*n_molecules*FSIZE);
-            d_wa1  = d_qtf  + (  QTF_SIZE*n_molecules*FSIZE);
-            d_wa2  = d_wa1  + (  WA1_SIZE*n_molecules*FSIZE);
-            d_wa3  = d_wa2  + (  WA2_SIZE*n_molecules*FSIZE);
-            d_wa4  = d_wa3  + (  WA3_SIZE*n_molecules*FSIZE);
-            d_ipvt = d_wa4  + (  WA4_SIZE*n_molecules*FSIZE);
-
-            // Initialize host array and copy it to CUDA device
-            for(int i = 0; i < n_molecules; i++)
-            {
-                cuMemcpyHtoD(d_X+i*(DATAX_SIZE*FSIZE),    X[i], DATAX_SIZE*FSIZE);
-                cuMemcpyHtoD(d_Y+i*(DATAY_SIZE*FSIZE),    y[i], DATAY_SIZE*FSIZE);
-                cuMemcpyHtoD(d_A+i*(DATAA_SIZE*FSIZE), par0[i], DATAA_SIZE*FSIZE);
-            }
-
-
-            // Do calculation on device (this goes through the modified legacy interface)
-            int maxcall = control_maxcall * (n_params + 1), one = 1;
-            void *args[] = { &n_input_data, &n_params, &d_A, &d_fvec, &control_ftol, &control_xtol, &control_gtol,
-                             &maxcall, &control_epsilon, &d_diag, &one, &control_stepbound,
-                             &d_fjac, &d_ipvt, &d_qtf, &d_wa1, &d_wa2, &d_wa3, &d_wa4, &d_X, &d_Y, &n_molecules };
 
             // working in 1D ... there is only 48kB od shared memory per block, thus with arrays of length 1248,
             // it is possible to run 4 threads with double precision (8B per item) or 8 threads with single precision (4B per item)
             int blockX = 32 / FSIZE;
             int nblocks = (n_molecules / blockX) + (int)(n_molecules % blockX > 0);    // --> ceil(n_molecules / blockX)
+            // nmolmem = number of molecules in memory (including the ones used for padding)
+            int nmolmem = n_molecules;
+            if(n_molecules % blockX > 0)
+                nmolmem += 8 - (n_molecules % blockX);
+	        
+            CUDA cuda;
+            
+            // Calculate the base address of each vector/matrix.
+            CUdeviceptr d_Y = cuda.alloc(nmolmem*n_input_data*FSIZE);
+            CUdeviceptr d_A = cuda.alloc(nmolmem*n_params*FSIZE);
+
+            // Arrange the data so the GPU can access to them coallesced in warps
+            FLOAT *tmpY, *tmpA;
+            tmpY = (FLOAT *)malloc(nmolmem*n_input_data*FSIZE);
+            tmpA = (FLOAT *)malloc(nmolmem*n_params*FSIZE);
+            // Y
+            for(int b = 0, idx = 0; b < nblocks; b++)
+                for(int i = 0; i < n_input_data; i++)
+                    for(int m = b*blockX; m < (b+1)*blockX; m++, idx++)
+                        tmpY[idx] = ((m < n_molecules) ? y[m][i] : 0);
+
+            // A
+            for(int b = 0, idx = 0; b < nblocks; b++)
+                for(int i = 0; i < n_params; i++)
+                    for(int m = b*blockX; m < (b+1)*blockX; m++, idx++)
+                        tmpA[idx] = ((m < n_molecules) ? par0[m][i] : 0);
+
+            // Initialize host array and copy it to CUDA device
+            cuMemcpyHtoD(d_Y, tmpY, nmolmem*n_input_data*FSIZE);
+            cuMemcpyHtoD(d_A, tmpA, nmolmem*n_params*FSIZE);
+
+            // Do calculation on device (this goes through the modified legacy interface)
+            int maxcall = control_maxcall * (n_params + 1), one = 1;
+            void *args[] = { &n_molecules, &n_boxsize, &d_Y, &n_params, &d_A, &control_ftol, &control_xtol,
+                             &control_gtol, &maxcall, &control_epsilon, &one, &control_stepbound };
 
             // run
             cuda.run("bin/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), args);
 
             // Retrieve result from device and store it in host array
-            FLOAT **results = new FLOAT*[n_molecules];
-            for(int i = 0; i < n_molecules; i++)
-            {
-                results[i] = new FLOAT[DATAA_SIZE];
-                cuMemcpyDtoH(results[i], d_A+i*(DATAA_SIZE*FSIZE), DATAA_SIZE*FSIZE);
-            }
+            cuMemcpyDtoH(tmpA, d_A, n_molecules*n_params*FSIZE);
+            
+            FLOAT **results = (FLOAT**)malloc(n_molecules*sizeof(FLOAT*));
+            for(int m = 0; m < n_molecules; m++)
+                results[m] = (FLOAT*)malloc(DATAA_SIZE*FSIZE);
+            
+            for(int b = 0, idx = 0; b < nblocks; b++)
+                for(int i = 0; i < n_params; i++)
+                    for(int m = b*blockX; m < (b+1)*blockX; m++, idx++)
+                        if(m < n_molecules)
+                            results[m][i] = tmpA[idx];
     
 	        // Clean up
-            cuda.free(d_memory);
+            free(tmpA);
+            free(tmpY);
+            cuda.free(d_Y);
+            cuda.free(d_A);
 
 	        TransformBackParams(results);
             return results;
@@ -253,7 +288,7 @@ FLOAT min(FLOAT *arr, int n)
 int main()
 {
     const int nparams = 5;  // {x,y,I,sigma,bkg}
-    const int molecules = 5;
+    const int molecules = 1;
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);
@@ -287,21 +322,6 @@ int main()
         a0[i][2] = max(im,fitregionsize2) - a0[i][4];
     }
 	//
-    // X - grid points
-	FLOAT **X = (FLOAT**)malloc(sizeof(FLOAT*)*molecules);
-    for(int i = 0; i < molecules; i++)
-    {
-        X[i] = (FLOAT*)malloc(sizeof(FLOAT)*2*fitregionsize2);
-        for(int x = -boxsize, idx = 0; x <= +boxsize; x++)
-        {
-		    for(int y = -boxsize; y <= +boxsize; y++)
-			{
-                X[i][idx++] = (FLOAT)x;
-                X[i][idx++] = (FLOAT)y;
-            }
-        }
-    }
-    //
     // Y - raw data
     FLOAT **Y = (FLOAT**)malloc(sizeof(FLOAT*)*molecules);
     for(int i = 0; i < molecules; i++)
@@ -312,8 +332,8 @@ int main()
     }
     //
     // Fitting
-    Gaussian2DFitting gauss(fitregionsize);
-    FLOAT **a = gauss.LMfit(molecules, a0, X, Y);
+    Gaussian2DFitting gauss(5);
+    FLOAT **a = gauss.LMfit(molecules, a0, Y);
     //
 	// expected results (with double precision): 0.0017, 0.056, 356.73, 0.94857, 182.76
     for(int i = 0; i < molecules; i++)

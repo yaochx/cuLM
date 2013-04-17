@@ -58,7 +58,7 @@
       <AdditionalDependencies>cuda.lib;cudart.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
-      <CodeGeneration>compute_35,sm_35</CodeGeneration>
+      <CodeGeneration>compute_11,sm_11</CodeGeneration>
       <FastMath>true</FastMath>
       <CompileOut>$(IntDir)%(Filename)%(Extension).obj</CompileOut>
       <NvccCompilation>compile</NvccCompilation>
@@ -83,7 +83,7 @@
       <AdditionalDependencies>cuda.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
-      <CodeGeneration>compute_35,sm_35</CodeGeneration>
+      <CodeGeneration>compute_11,sm_11</CodeGeneration>
       <NvccCompilation>compile</NvccCompilation>
       <FastMath>true</FastMath>
       <CompileOut>$(IntDir)%(Filename)%(Extension).obj</CompileOut>
@@ -95,10 +95,10 @@
       <NvccCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">ptx</NvccCompilation>
       <TargetMachinePlatform Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">32</TargetMachinePlatform>
       <NvccCompilation Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ptx</NvccCompilation>
-      <CodeGeneration Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">compute_30,sm_30</CodeGeneration>
-      <CodeGeneration Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">compute_30,sm_30</CodeGeneration>
+      <CodeGeneration Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">compute_11,sm_11</CodeGeneration>
+      <CodeGeneration Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">compute_11,sm_11</CodeGeneration>
       <GenerateLineInfo Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</GenerateLineInfo>
-      <CompileOut Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(OutDir)lmmin.ptx</CompileOut>
+      <CompileOut Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(SolutionDir)bin/lmmin.ptx</CompileOut>
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>

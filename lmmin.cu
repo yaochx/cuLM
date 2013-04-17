@@ -26,50 +26,65 @@
 #include "lmmin.cuh"
 
 /* *************************** simple macros ******************************* */
-#define MIN(a,b) (((a)<=(b)) ? (a) : (b))
-#define MAX(a,b) (((a)>=(b)) ? (a) : (b))
-#define SQR(x)   (x)*(x)
+#define MIN(a,b)    (((a)<=(b)) ? (a) : (b))
+#define MAX(a,b)    (((a)>=(b)) ? (a) : (b))
+#define SQR(x)      ((x)*(x))
+#define CID(i)      ((i) * blockDim.x + threadIdx.x)
+#define CID_BASE(i) ((i) * blockDim.x)
 
 /* ******************* fitting a 2D symmetric gaussian ********************* */
-#define DIM 2
-#define NPAR 5
-
-__device__ __host__ FLOAT gaussian(FLOAT *X, FLOAT *par)
+__device__ FLOAT gaussian(FLOAT x, FLOAT y, FLOAT *par)
 {
-	return par[2] * exp(-0.5f * ( SQR((X[0]-par[0])/par[3]) + SQR((X[1]-par[1])/par[3]) )  ) + par[4];
+	return par[CID(2)] * exp(-0.5f * ( SQR((x-par[CID(0)])/par[CID(3)]) + SQR((y-par[CID(1)])/par[CID(3)]) )  ) + par[CID(4)];
 }
 
 // Transformation of function parameters to limit their range
-__device__ __host__ void partransf(FLOAT *parin, FLOAT *parout, size_t npar)
+__device__ void partransf(FLOAT *parin, FLOAT *parout)
 {
-	parout[0] = parin[0];       // x center stays the same
-	parout[1] = parin[1];       // y center stays the same
-	parout[2] = SQR(parin[2]);  // amplitude >= 0
-	parout[3] = SQR(parin[3]);  // sigma >= 0
-	parout[4] = SQR(parin[4]);  // background >= 0
+	parout[CID(0)] = parin[CID(0)];       // x center stays the same
+	parout[CID(1)] = parin[CID(1)];       // y center stays the same
+	parout[CID(2)] = SQR(parin[CID(2)]);  // amplitude >= 0
+	parout[CID(3)] = SQR(parin[CID(3)]);  // sigma >= 0
+	parout[CID(4)] = SQR(parin[CID(4)]);  // background >= 0
 }
 
 // Inverse transformation of function parameters
-__device__ __host__ void parinvtransf(FLOAT *parin, FLOAT *parout, size_t npar)
+__device__ void parinvtransf(FLOAT *parin, FLOAT *parout)
 {
-	parout[0] = parin[0];
-	parout[1] = parin[1];
-	parout[2] = sqrt(parin[2]);
-	parout[3] = sqrt(parin[3]);
-	parout[4] = sqrt(parin[4]);
+	parout[CID(0)] = parin[CID(0)];
+	parout[CID(1)] = parin[CID(1)];
+	parout[CID(2)] = sqrt(parin[CID(2)]);
+	parout[CID(3)] = sqrt(parin[CID(3)]);
+	parout[CID(4)] = sqrt(parin[CID(4)]);
 }
 
-__device__ __host__ void evaluate(FLOAT *par, int npts, FLOAT *fvec, FLOAT *X, FLOAT *y)
+__device__ void evaluate(FLOAT *par, int boxsize, FLOAT *fvec, FLOAT *Y)   // X is 'wired' in here [-boxsize:+boxsize]
 {
-	int	   i;
-	FLOAT p[NPAR];
-    
+	FLOAT p[8*5]; // TODO: shared! + size should be scalable with blockDim.x!
+    float par0 = par[CID(0)];
+    float par1 = par[CID(1)];
+    float par2 = par[CID(2)];
+    float par3 = par[CID(3)];
+    float par4 = par[CID(4)];
+    fvec[0] = par0+par1+par2+par3+par4;
+
 	// transform function parameters to limit their range
-	partransf(par, p, NPAR);
+	partransf(par, p);
+    float p0 = p[CID(0)];
+    float p1 = p[CID(1)];
+    float p2 = p[CID(2)];
+    float p3 = p[CID(3)];
+    float p4 = p[CID(4)];
+    fvec[1] = p0+p1+p2+p3+p4;
 
 	// compute the difference " F = y - fun(X, par) " for all data points
-	for (i = 0; i < npts; i++, X += DIM)
-		*(fvec++) = *(y++) - gaussian(X, p);
+    for(int x = -boxsize, idx = 0; x <= +boxsize; x++)
+		for(int y = -boxsize; y <= +boxsize; y++, idx++)
+        {
+            int cid = CID(idx);
+            float yy = Y[cid];
+            fvec[cid] = Y[CID(idx)] - gaussian((FLOAT)x, (FLOAT)y, p);
+        }
 }
 
 
@@ -84,38 +99,45 @@ __device__ FLOAT lm_enorm(int, FLOAT *);
 
 /***** the low-level legacy interface for full control. *****/
 __device__ void
-lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
-         FLOAT xtol, FLOAT gtol, int maxfev, FLOAT epsfcn,
-	     int mode, FLOAT factor, FLOAT *g_dataX, FLOAT *g_dataY)
+lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT ftol,
+         FLOAT xtol, FLOAT gtol, int maxfev, FLOAT epsfcn, int mode, FLOAT factor)
 {
     // TI = ThreadIndex
-    // all threads are independant of each other
+    // all threads are independant of each other, so I do not need to use __syncthreads anywhere in the code
     int TI = blockIdx.x * blockDim.x + threadIdx.x;
     if(TI >= TI_MAX) return;
 
     // these two are here because of the macros in lmmin.cuh
+    int m = SQR(1+2*boxsize);
     int n_params = n;
     int n_input_data = m;
 
     extern __shared__ FLOAT memory[];
     
-    FLOAT *dataX = memory;
-    FLOAT *dataY = dataX + blockDim.x*DATAX_SIZE*FSIZE;
-    FLOAT *x     = dataY + blockDim.x*DATAY_SIZE*FSIZE;
-    FLOAT *fvec  = x     + blockDim.x*DATAA_SIZE*FSIZE;
-    FLOAT *diag  = fvec  + blockDim.x* FVEC_SIZE*FSIZE;
-    FLOAT *fjac  = diag  + blockDim.x* DIAG_SIZE*FSIZE;
-    FLOAT *qtf   = fjac  + blockDim.x* FJAC_SIZE*FSIZE;
-    FLOAT *wa1   = qtf   + blockDim.x*  QTF_SIZE*FSIZE;
-    FLOAT *wa2   = wa1   + blockDim.x*  WA1_SIZE*FSIZE;
-    FLOAT *wa3   = wa2   + blockDim.x*  WA2_SIZE*FSIZE;
-    FLOAT *wa4   = wa3   + blockDim.x*  WA3_SIZE*FSIZE;
-    int *ipvt = (int *)(wa4 + blockDim.x*WA4_SIZE*FSIZE);
+    FLOAT *dataY = memory;  // (FLOAT*)+1 is addition of the sizeof(FLOAT)!
+    FLOAT *x     = dataY + blockDim.x*DATAY_SIZE;
+    FLOAT *fvec  = x     + blockDim.x*DATAA_SIZE;
+    FLOAT *diag  = fvec  + blockDim.x* FVEC_SIZE;
+    FLOAT *fjac  = diag  + blockDim.x* DIAG_SIZE;
+    FLOAT *qtf   = fjac  + blockDim.x* FJAC_SIZE;
+    FLOAT *wa1   = qtf   + blockDim.x*  QTF_SIZE;
+    FLOAT *wa2   = wa1   + blockDim.x*  WA1_SIZE;
+    FLOAT *wa3   = wa2   + blockDim.x*  WA2_SIZE;
+    FLOAT *wa4   = wa3   + blockDim.x*  WA3_SIZE;
+    int *ipvt = (int *)(wa4 + blockDim.x*WA4_SIZE);
 
-    // TODO: udelat dale ve funkci to adresovani tak sikovne, aby byl zarizenej i coallescing! takze aby fvec[0] byl na adresach [0:threadIdx.x]
-    // TODO: zkopirovat dataX,Y,A z globalni pameti do sdileny!
-    // TODO: ty data by mely byt vygenerovany uz rovnou ve spravnym formatu na CPU, jinak ztracim ca, ne? radsi otestovat...nejdriv kopirovat na GPU a pak zkusit prepsat na CPU a zmerit
-    //fvec[i * blockDim.x + threadIdx.x]
+    // copy the input data from the slow global memory to the much faster shared memory
+    for(int i = 0; i < m; i++)
+    {
+        int cid = CID(i);
+        dataY[cid] = g_dataY[blockIdx.x*blockDim.x + CID(i)];
+    }
+
+    for(int i = 0; i < n; i++)
+    {
+        int cid = CID(i);
+        x[cid] = g_dataA[blockIdx.x*blockDim.x + CID(i)];
+    }
 
 /*
  *   The purpose of lmdif is to minimize the sum of the squares of
@@ -317,7 +339,7 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
     }
     if (mode == 2) {		/* scaling by diag[] */
 	    for (j = 0; j < n; j++) {	/* check for nonpositive elements */
-	        if (diag[DIAG_SIZE*TI+j] <= 0.0) {
+	        if (diag[CID(j)] <= 0.0) {
 		        info = 0;	// invalid parameter
 		        return;
 	        }
@@ -327,9 +349,9 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 /*** lmdif: evaluate function at starting point and calculate norm. ***/
 
     info = 0;
-    evaluate(&x[DATAA_SIZE*TI], m, &fvec[FVEC_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]); ++nfev;
+    evaluate(x, boxsize, fvec, dataY); ++nfev;
     if (info < 0) return;
-    fnorm = lm_enorm(m, &fvec[FVEC_SIZE*TI]);
+    fnorm = lm_enorm(m, fvec);
 
 /*** lmdif: the outer loop. ***/
 
@@ -338,36 +360,36 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 /*** outer: calculate the jacobian matrix. ***/
 
 	for (j = 0; j < n; j++) {
-	    temp = x[DATAA_SIZE*TI+j];
+	    temp = x[CID(j)];
 	    step = eps * fabs(temp);
 	    if (step == 0.)
 		step = eps;
-	    x[DATAA_SIZE*TI+j] = temp + step;
+	    x[CID(j)] = temp + step;
 	    info = 0;
-	    evaluate(&x[DATAA_SIZE*TI], m, &wa4[WA4_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]);
+	    evaluate(x, boxsize, wa4, dataY);
 	    if (info < 0) return;	/* user requested break */
 	    for (i = 0; i < m; i++) /* changed in 2.3, Mark Bydder */
-		    fjac[FJAC_SIZE*TI + j * m + i] = (wa4[WA4_SIZE*TI+i] - fvec[FVEC_SIZE*TI+i]) / (x[DATAA_SIZE*TI+j] - temp);
-	    x[DATAA_SIZE*TI+j] = temp;
+		    fjac[CID(j * m + i)] = (wa4[CID(i)] - fvec[CID(i)]) / (x[CID(j)] - temp);
+	    x[CID(j)] = temp;
 	}
 
 /*** outer: compute the qr factorization of the jacobian. ***/
 
-	lm_qrfac(m, n, &fjac[FJAC_SIZE*TI], 1, &ipvt[IPVT_SIZE*TI], &wa1[WA1_SIZE*TI], &wa2[WA2_SIZE*TI], &wa3[WA3_SIZE*TI]);
+	lm_qrfac(m, n, fjac, 1, ipvt, wa1, wa2, wa3);
 
 	if (iter == 1) { /* first iteration */
 	    if (mode != 2) {
                 /* diag := norms of the columns of the initial jacobian */
 		for (j = 0; j < n; j++) {
-		    diag[DIAG_SIZE*TI+j] = wa2[WA2_SIZE*TI+j];
-		    if (wa2[WA2_SIZE*TI+j] == 0.)
-			diag[DIAG_SIZE*TI+j] = 1.;
+		    diag[CID(j)] = wa2[CID(j)];
+		    if (wa2[CID(j)] == 0.)
+			diag[CID(j)] = 1.;
 		}
 	    }
             /* use diag to scale x, then calculate the norm */
 	    for (j = 0; j < n; j++)
-		wa3[WA3_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * x[DATAA_SIZE*TI+j];
-	    xnorm = lm_enorm(n, &wa3[WA3_SIZE*TI]);
+		wa3[CID(j)] = diag[CID(j)] * x[CID(j)];
+	    xnorm = lm_enorm(n, wa3);
             /* initialize the step bound delta. */
 	    delta = factor * xnorm;
 	    if (delta == 0.)
@@ -377,20 +399,20 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 /*** outer: form (q transpose)*fvec and store first n components in qtf. ***/
 
 	for (i = 0; i < m; i++)
-	    wa4[WA4_SIZE*TI+i] = fvec[FVEC_SIZE*TI+i];
+	    wa4[CID(i)] = fvec[CID(i)];
 
 	for (j = 0; j < n; j++) {
-	    temp3 = fjac[FJAC_SIZE*TI + j * m + j];
+	    temp3 = fjac[CID(j * m + j)];
 	    if (temp3 != 0.) {
 		sum = 0;
 		for (i = j; i < m; i++)
-		    sum += fjac[FJAC_SIZE*TI + j * m + i] * wa4[WA4_SIZE*TI+i];
+		    sum += fjac[CID(j * m + i)] * wa4[CID(i)];
 		temp = -sum / temp3;
 		for (i = j; i < m; i++)
-		    wa4[WA4_SIZE*TI+i] += fjac[FJAC_SIZE*TI + j * m + i] * temp;
+		    wa4[CID(i)] += fjac[CID(j * m + i)] * temp;
 	    }
-	    fjac[FJAC_SIZE*TI + j * m + j] = wa1[WA1_SIZE*TI+j];
-	    qtf[QTF_SIZE*TI+j] = wa4[WA4_SIZE*TI+j];
+	    fjac[CID(j * m + j)] = wa1[CID(j)];
+	    qtf[CID(j)] = wa4[CID(j)];
 	}
 
 /** outer: compute norm of scaled gradient and test for convergence. ***/
@@ -398,13 +420,13 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 	gnorm = 0;
 	if (fnorm != 0) {
 	    for (j = 0; j < n; j++) {
-		if (wa2[WA2_SIZE*TI+ipvt[IPVT_SIZE*TI+j]] == 0)
+		if (wa2[CID(ipvt[CID(j)])] == 0)
 		    continue;
 
 		sum = 0.;
 		for (i = 0; i <= j; i++)
-		    sum += fjac[FJAC_SIZE*TI + j * m + i] * qtf[QTF_SIZE*TI+i] / fnorm;
-		gnorm = MAX(gnorm, fabs(sum / wa2[WA2_SIZE*TI+ipvt[IPVT_SIZE*TI+j]]));
+		    sum += fjac[CID(j * m + i)] * qtf[CID(i)] / fnorm;
+		gnorm = MAX(gnorm, fabs(sum / wa2[CID(ipvt[CID(j)])]));
 	    }
 	}
 
@@ -417,7 +439,7 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 
 	if (mode != 2) {
 	    for (j = 0; j < n; j++)
-		diag[DIAG_SIZE*TI+j] = MAX(diag[DIAG_SIZE*TI+j], wa2[WA2_SIZE*TI+j]);
+		diag[CID(j)] = MAX(diag[CID(j)], wa2[CID(j)]);
 	}
 
 /*** the inner loop. ***/
@@ -425,17 +447,16 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 
 /*** inner: determine the levenberg-marquardt parameter. ***/
 
-	    lm_lmpar(n, &fjac[FJAC_SIZE*TI], m, &ipvt[IPVT_SIZE*TI], &diag[DIAG_SIZE*TI], &qtf[QTF_SIZE*TI], delta, &par,
-		     &wa1[WA1_SIZE*TI], &wa2[WA2_SIZE*TI], &wa3[WA3_SIZE*TI], &wa4[WA4_SIZE*TI]);
+	    lm_lmpar(n, fjac, m, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
 
 /*** inner: store the direction p and x + p; calculate the norm of p. ***/
 
 	    for (j = 0; j < n; j++) {
-		wa1[WA1_SIZE*TI+j] = -wa1[WA1_SIZE*TI+j];
-		wa2[WA2_SIZE*TI+j] = x[DATAA_SIZE*TI+j] + wa1[WA1_SIZE*TI+j];
-		wa3[WA3_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * wa1[WA1_SIZE*TI+j];
+		wa1[CID(j)] = -wa1[CID(j)];
+		wa2[CID(j)] = x[CID(j)] + wa1[CID(j)];
+		wa3[CID(j)] = diag[CID(j)] * wa1[CID(j)];
 	    }
-	    pnorm = lm_enorm(n, &wa3[WA3_SIZE*TI]);
+	    pnorm = lm_enorm(n, wa3);
 
 /*** inner: on the first iteration, adjust the initial step bound. ***/
 
@@ -445,10 +466,10 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
             /* evaluate the function at x + p and calculate its norm. */
 
 	    info = 0;
-	    evaluate(&wa2[WA2_SIZE*TI], m, &wa4[WA4_SIZE*TI], &dataX[DATAX_SIZE*TI], &dataY[DATAY_SIZE*TI]); ++nfev;
+	    evaluate(wa2, boxsize, wa4, dataY); ++nfev;
 	    if (info < 0) return; /* user requested break. */
 
-	    fnorm1 = lm_enorm(m, &wa4[WA4_SIZE*TI]);
+	    fnorm1 = lm_enorm(m, wa4);
 
 /*** inner: compute the scaled actual reduction. ***/
 
@@ -461,11 +482,11 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
      the scaled directional derivative. ***/
 
 	    for (j = 0; j < n; j++) {
-		wa3[WA3_SIZE*TI+j] = 0;
+		wa3[CID(j)] = 0;
 		for (i = 0; i <= j; i++)
-		    wa3[WA3_SIZE*TI+i] += fjac[FJAC_SIZE*TI+j * m + i] * wa1[WA1_SIZE*TI+ipvt[IPVT_SIZE*TI+j]];
+		    wa3[CID(i)] += fjac[CID(j * m + i)] * wa1[CID(ipvt[CID(j)])];
 	    }
-	    temp1 = lm_enorm(n, &wa3[WA3_SIZE*TI]) / fnorm;
+	    temp1 = lm_enorm(n, wa3) / fnorm;
 	    temp2 = sqrt(par) * pnorm / fnorm;
 	    prered = SQR(temp1) + 2 * SQR(temp2);
 	    dirder = -(SQR(temp1) + SQR(temp2));
@@ -495,12 +516,12 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 	    if (ratio >= p0001) {
                 /* yes, success: update x, fvec, and their norms. */
 		for (j = 0; j < n; j++) {
-		    x[DATAA_SIZE*TI+j] = wa2[WA2_SIZE*TI+j];
-		    wa2[WA2_SIZE*TI+j] = diag[DIAG_SIZE*TI+j] * x[DATAA_SIZE*TI+j];
+		    x[CID(j)] = wa2[CID(j)];
+		    wa2[CID(j)] = diag[CID(j)] * x[CID(j)];
 		}
 		for (i = 0; i < m; i++)
-		    fvec[FVEC_SIZE*TI+i] = wa4[WA4_SIZE*TI+i];
-		xnorm = lm_enorm(n, &wa2[WA2_SIZE*TI]);
+		    fvec[CID(i)] = wa4[CID(i)];
+		xnorm = lm_enorm(n, wa2);
 		fnorm = fnorm1;
 		iter++;
 	    }
@@ -513,7 +534,12 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 	    if (delta <= xtol * xnorm)
 		info += 2;
 	    if (info != 0)
-		return;
+        {
+            // save the results back into the global memory! unless I would not be able to read the results!
+            for(int i = 0; i < n; i++)
+                g_dataA[blockIdx.x*blockDim.x + CID(i)] = x[CID(i)];
+		    return;
+        }
 
 /*** inner: tests for termination and stringent tolerances. ***/
 
@@ -526,7 +552,15 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 	    if (gnorm <= LM_MACHEP)
 		    info = 8;
 	    if (info != 0)
+        {
+            // save the results back into the global memory! unless I would not be able to read the results!
+            for(int i = 0; i < n; i++)
+            {
+                int cid = CID(i);
+                g_dataA[blockIdx.x*blockDim.x + cid] = x[CID(i)];
+            }
 		    return;
+        }
 
 /*** inner: end of the loop. repeat if iteration unsuccessful. ***/
 
@@ -535,6 +569,7 @@ lm_lmdif(int TI_MAX, int m, int n, FLOAT *g_dataA, FLOAT ftol,
 /*** outer: end of the loop. ***/
 
     } while (1);
+
 
 } /*** lm_lmdif. ***/
 
@@ -625,28 +660,28 @@ __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 
     nsing = n;
     for (j = 0; j < n; j++) {
-	wa1[j] = qtb[j];
-	if (r[j * ldr + j] == 0 && nsing == n)
+	wa1[CID(j)] = qtb[CID(j)];
+	if (r[CID(j * ldr + j)] == 0 && nsing == n)
 	    nsing = j;
 	if (nsing < n)
-	    wa1[j] = 0;
+	    wa1[CID(j)] = 0;
     }
     for (j = nsing - 1; j >= 0; j--) {
-	wa1[j] = wa1[j] / r[j + ldr * j];
-	temp = wa1[j];
+	wa1[CID(j)] = wa1[CID(j)] / r[CID(j + ldr * j)];
+	temp = wa1[CID(j)];
 	for (i = 0; i < j; i++)
-	    wa1[i] -= r[j * ldr + i] * temp;
+	    wa1[CID(i)] -= r[CID(j * ldr + i)] * temp;
     }
 
     for (j = 0; j < n; j++)
-	x[ipvt[j]] = wa1[j];
+	x[CID(ipvt[CID(j)])] = wa1[CID(j)];
 
 /*** lmpar: initialize the iteration counter, evaluate the function at the
      origin, and test for acceptance of the gauss-newton direction. ***/
 
     iter = 0;
     for (j = 0; j < n; j++)
-	wa2[j] = diag[j] * x[j];
+	wa2[CID(j)] = diag[CID(j)] * x[CID(j)];
     dxnorm = lm_enorm(n, wa2);
     fp = dxnorm - delta;
     if (fp <= p1 * delta) {
@@ -661,13 +696,13 @@ __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
     parl = 0;
     if (nsing >= n) {
 	for (j = 0; j < n; j++)
-	    wa1[j] = diag[ipvt[j]] * wa2[ipvt[j]] / dxnorm;
+	    wa1[CID(j)] = diag[CID(ipvt[CID(j)])] * wa2[CID(ipvt[CID(j)])] / dxnorm;
 
 	for (j = 0; j < n; j++) {
 	    sum = 0.;
 	    for (i = 0; i < j; i++)
-		sum += r[j * ldr + i] * wa1[i];
-	    wa1[j] = (wa1[j] - sum) / r[j + ldr * j];
+		sum += r[CID(j * ldr + i)] * wa1[CID(i)];
+	    wa1[CID(j)] = (wa1[CID(j)] - sum) / r[CID(j + ldr * j)];
 	}
 	temp = lm_enorm(n, wa1);
 	parl = fp / delta / temp / temp;
@@ -678,8 +713,8 @@ __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
     for (j = 0; j < n; j++) {
 	sum = 0;
 	for (i = 0; i <= j; i++)
-	    sum += r[j * ldr + i] * qtb[i];
-	wa1[j] = sum / diag[ipvt[j]];
+	    sum += r[CID(j * ldr + i)] * qtb[CID(i)];
+	wa1[CID(j)] = sum / diag[CID(ipvt[CID(j)])];
     }
     gnorm = lm_enorm(n, wa1);
     paru = gnorm / delta;
@@ -704,10 +739,10 @@ __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 	    *par = MAX(LM_DWARF, 0.001 * paru);
 	temp = sqrt(*par);
 	for (j = 0; j < n; j++)
-	    wa1[j] = temp * diag[j];
+	    wa1[CID(j)] = temp * diag[CID(j)];
 	lm_qrsolv(n, r, ldr, ipvt, wa1, qtb, x, sdiag, wa2);
 	for (j = 0; j < n; j++)
-	    wa2[j] = diag[j] * x[j];
+	    wa2[CID(j)] = diag[CID(j)] * x[CID(j)];
 	dxnorm = lm_enorm(n, wa2);
 	fp_old = fp;
 	fp = dxnorm - delta;
@@ -724,12 +759,12 @@ __device__ void lm_lmpar(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
         /** compute the Newton correction. **/
 
 	for (j = 0; j < n; j++)
-	    wa1[j] = diag[ipvt[j]] * wa2[ipvt[j]] / dxnorm;
+	    wa1[CID(j)] = diag[CID(ipvt[CID(j)])] * wa2[CID(ipvt[CID(j)])] / dxnorm;
 
 	for (j = 0; j < n; j++) {
-	    wa1[j] = wa1[j] / sdiag[j];
+	    wa1[CID(j)] = wa1[CID(j)] / sdiag[CID(j)];
 	    for (i = j + 1; i < n; i++)
-		wa1[i] -= r[j * ldr + i] * wa1[j];
+		wa1[CID(i)] -= r[CID(j * ldr + i)] * wa1[CID(j)];
 	}
 	temp = lm_enorm(n, wa1);
 	parc = fp / delta / temp / temp;
@@ -814,11 +849,11 @@ void lm_qrfac(int m, int n, FLOAT *a, int pivot, int *ipvt,
 /*** qrfac: compute initial column norms and initialize several arrays. ***/
 
     for (j = 0; j < n; j++) {
-	acnorm[j] = lm_enorm(m, &a[j * m]);
-	rdiag[j] = acnorm[j];
-	wa[j] = rdiag[j];
+	acnorm[CID(j)] = lm_enorm(m, &a[CID_BASE(j * m)]);
+	rdiag[CID(j)] = acnorm[CID(j)];
+	wa[CID(j)] = rdiag[CID(j)];
 	if (pivot)
-	    ipvt[j] = j;
+	    ipvt[CID(j)] = j;
     }
 
 /*** qrfac: reduce a to r with householder transformations. ***/
@@ -832,37 +867,37 @@ void lm_qrfac(int m, int n, FLOAT *a, int pivot, int *ipvt,
 
 	kmax = j;
 	for (k = j + 1; k < n; k++)
-	    if (rdiag[k] > rdiag[kmax])
+	    if (rdiag[CID(k)] > rdiag[CID(kmax)])
 		kmax = k;
 	if (kmax == j)
 	    goto pivot_ok;
 
 	for (i = 0; i < m; i++) {
-	    temp = a[j * m + i];
-	    a[j * m + i] = a[kmax * m + i];
-	    a[kmax * m + i] = temp;
+	    temp = a[CID(j * m + i)];
+	    a[CID(j * m + i)] = a[CID(kmax * m + i)];
+	    a[CID(kmax * m + i)] = temp;
 	}
-	rdiag[kmax] = rdiag[j];
-	wa[kmax] = wa[j];
-	k = ipvt[j];
-	ipvt[j] = ipvt[kmax];
-	ipvt[kmax] = k;
+	rdiag[CID(kmax)] = rdiag[CID(j)];
+	wa[CID(kmax)] = wa[CID(j)];
+	k = ipvt[CID(j)];
+	ipvt[CID(j)] = ipvt[CID(kmax)];
+	ipvt[CID(kmax)] = k;
 
       pivot_ok:
         /** compute the Householder transformation to reduce the
             j-th column of a to a multiple of the j-th unit vector. **/
 
-	ajnorm = lm_enorm(m - j, &a[j * m + j]);
+	ajnorm = lm_enorm(m - j, &a[CID_BASE(j * m + j)]);
 	if (ajnorm == 0.) {
-	    rdiag[j] = 0;
+	    rdiag[CID(j)] = 0;
 	    continue;
 	}
 
-	if (a[j * m + j] < 0.)
+	if (a[CID(j * m + j)] < 0.)
 	    ajnorm = -ajnorm;
 	for (i = j; i < m; i++)
-	    a[j * m + i] /= ajnorm;
-	a[j * m + j] += 1;
+	    a[CID(j * m + i)] /= ajnorm;
+	a[CID(j * m + j)] += 1;
 
         /** apply the transformation to the remaining columns
             and update the norms. **/
@@ -871,26 +906,26 @@ void lm_qrfac(int m, int n, FLOAT *a, int pivot, int *ipvt,
 	    sum = 0;
 
 	    for (i = j; i < m; i++)
-		sum += a[j * m + i] * a[k * m + i];
+		sum += a[CID(j * m + i)] * a[CID(k * m + i)];
 
-	    temp = sum / a[j + m * j];
+	    temp = sum / a[CID(j + m * j)];
 
 	    for (i = j; i < m; i++)
-		a[k * m + i] -= temp * a[j * m + i];
+		a[CID(k * m + i)] -= temp * a[CID(j * m + i)];
 
-	    if (pivot && rdiag[k] != 0.) {
-		temp = a[m * k + j] / rdiag[k];
+	    if (pivot && rdiag[CID(k)] != 0.) {
+		temp = a[CID(m * k + j)] / rdiag[CID(k)];
 		temp = MAX(0., 1 - temp * temp);
-		rdiag[k] *= sqrt(temp);
-		temp = rdiag[k] / wa[k];
+		rdiag[CID(k)] *= sqrt(temp);
+		temp = rdiag[CID(k)] / wa[CID(k)];
 		if (p05 * SQR(temp) <= LM_MACHEP) {
-		    rdiag[k] = lm_enorm(m - j - 1, &a[m * k + j + 1]);
-		    wa[k] = rdiag[k];
+		    rdiag[CID(k)] = lm_enorm(m - j - 1, &a[CID_BASE(m * k + j + 1)]);
+		    wa[CID(k)] = rdiag[CID(k)];
 		}
 	    }
 	}
 
-	rdiag[j] = -ajnorm;
+	rdiag[CID(j)] = -ajnorm;
     }
 }
 
@@ -971,9 +1006,9 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 
     for (j = 0; j < n; j++) {
 	for (i = j; i < n; i++)
-	    r[j * ldr + i] = r[i * ldr + j];
-	x[j] = r[j * ldr + j];
-	wa[j] = qtb[j];
+	    r[CID(j * ldr + i)] = r[CID(i * ldr + j)];
+	x[CID(j)] = r[CID(j * ldr + j)];
+	wa[CID(j)] = qtb[CID(j)];
     }
 
 /*** qrsolv: eliminate the diagonal matrix d using a givens rotation. ***/
@@ -983,11 +1018,11 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 /*** qrsolv: prepare the row of d to be eliminated, locating the
      diagonal element using p from the qr factorization. ***/
 
-	if (diag[ipvt[j]] == 0.)
+	if (diag[CID(ipvt[CID(j)])] == 0.)
 	    goto L90;
 	for (k = j; k < n; k++)
-	    sdiag[k] = 0.;
-	sdiag[j] = diag[ipvt[j]];
+	    sdiag[CID(k)] = 0.;
+	sdiag[CID(j)] = diag[CID(ipvt[CID(j)])];
 
 /*** qrsolv: the transformations to eliminate the row of d modify only 
      a single element of (q transpose)*b beyond the first n, which is
@@ -999,15 +1034,15 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
             /** determine a givens rotation which eliminates the
                 appropriate element in the current row of d. **/
 
-	    if (sdiag[k] == 0.)
+	    if (sdiag[CID(k)] == 0.)
 		continue;
 	    kk = k + ldr * k;
-	    if (fabs(r[kk]) < fabs(sdiag[k])) {
-		_cot = r[kk] / sdiag[k];
+	    if (fabs(r[CID(kk)]) < fabs(sdiag[CID(k)])) {
+		_cot = r[CID(kk)] / sdiag[CID(k)];
 		_sin = 1 / sqrt(1 + SQR(_cot));
 		_cos = _sin * _cot;
 	    } else {
-		_tan = sdiag[k] / r[kk];
+		_tan = sdiag[CID(k)] / r[CID(kk)];
 		_cos = 1 / sqrt(1 + SQR(_tan));
 		_sin = _cos * _tan;
 	    }
@@ -1015,17 +1050,17 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
             /** compute the modified diagonal element of r and
                 the modified element of ((q transpose)*b,0). **/
 
-	    r[kk] = _cos * r[kk] + _sin * sdiag[k];
-	    temp = _cos * wa[k] + _sin * qtbpj;
-	    qtbpj = -_sin * wa[k] + _cos * qtbpj;
-	    wa[k] = temp;
+	    r[CID(kk)] = _cos * r[CID(kk)] + _sin * sdiag[CID(k)];
+	    temp = _cos * wa[CID(k)] + _sin * qtbpj;
+	    qtbpj = -_sin * wa[CID(k)] + _cos * qtbpj;
+	    wa[CID(k)] = temp;
 
             /** accumulate the tranformation in the row of s. **/
 
 	    for (i = k + 1; i < n; i++) {
-		temp = _cos * r[k * ldr + i] + _sin * sdiag[i];
-		sdiag[i] = -_sin * r[k * ldr + i] + _cos * sdiag[i];
-		r[k * ldr + i] = temp;
+		temp = _cos * r[CID(k * ldr + i)] + _sin * sdiag[CID(i)];
+		sdiag[CID(i)] = -_sin * r[CID(k * ldr + i)] + _cos * sdiag[CID(i)];
+		r[CID(k * ldr + i)] = temp;
 	    }
 	}
 
@@ -1033,8 +1068,8 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
         /** store the diagonal element of s and restore
             the corresponding diagonal element of r. **/
 
-	sdiag[j] = r[j * ldr + j];
-	r[j * ldr + j] = x[j];
+	sdiag[CID(j)] = r[CID(j * ldr + j)];
+	r[CID(j * ldr + j)] = x[CID(j)];
     }
 
 /*** qrsolv: solve the triangular system for z. if the system is
@@ -1042,23 +1077,23 @@ void lm_qrsolv(int n, FLOAT *r, int ldr, int *ipvt, FLOAT *diag,
 
     nsing = n;
     for (j = 0; j < n; j++) {
-	if (sdiag[j] == 0. && nsing == n)
+	if (sdiag[CID(j)] == 0. && nsing == n)
 	    nsing = j;
 	if (nsing < n)
-	    wa[j] = 0;
+	    wa[CID(j)] = 0;
     }
 
     for (j = nsing - 1; j >= 0; j--) {
 	sum = 0;
 	for (i = j + 1; i < nsing; i++)
-	    sum += r[j * ldr + i] * wa[i];
-	wa[j] = (wa[j] - sum) / sdiag[j];
+	    sum += r[CID(j * ldr + i)] * wa[CID(i)];
+	wa[CID(j)] = (wa[CID(j)] - sum) / sdiag[CID(j)];
     }
 
 /*** qrsolv: permute the components of z back to components of x. ***/
 
     for (j = 0; j < n; j++)
-	x[ipvt[j]] = wa[j];
+	x[CID(ipvt[CID(j)])] = wa[CID(j)];
 
 } /*** lm_qrsolv. ***/
 
@@ -1097,7 +1132,7 @@ __device__ FLOAT lm_enorm(int n, FLOAT *x)
 
     /** sum squares. **/
     for (i = 0; i < n; i++) {
-	xabs = fabs(x[i]);
+	xabs = fabs(x[CID(i)]);
 	if (xabs > LM_SQRT_DWARF && xabs < agiant) {
             /*  sum for intermediate components. */
 	    s2 += xabs * xabs;
@@ -1150,8 +1185,7 @@ __device__ FLOAT lm_enorm(int n, FLOAT *x)
 // C wrapper around our template kernel
 //
 extern "C" __global__ void
-lmmin(int nthreads, int ndata, int nparams, FLOAT *params, FLOAT ftol, FLOAT xtol, FLOAT gtol, int maxfev,
-      FLOAT epsfcn, int mode, FLOAT factor, FLOAT *dataX, FLOAT *dataY)
+lmmin(int nthreads, int boxsize, FLOAT *dataY, int nparams, FLOAT *params, FLOAT ftol, FLOAT xtol, FLOAT gtol, int maxfev, FLOAT epsfcn, int mode, FLOAT factor)
 {
-    lm_lmdif(nthreads, ndata, nparams, params, ftol, xtol, gtol, maxfev, epsfcn, mode, factor, dataX, dataY);
+    lm_lmdif(nthreads, boxsize, dataY, nparams, params, ftol, xtol, gtol, maxfev, epsfcn, mode, factor);
 }
