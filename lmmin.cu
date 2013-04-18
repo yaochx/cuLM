@@ -60,15 +60,15 @@ __device__ void parinvtransf(FLOAT *parin, FLOAT *parout)
 
 __device__ void evaluate(FLOAT *par, int boxsize, FLOAT *fvec, FLOAT *Y)   // X is 'wired' in here [-boxsize:+boxsize]
 {
-	FLOAT p[8*5]; // TODO: shared! + size should be scalable with blockDim.x!
-
+    extern __shared__ FLOAT p[];    // `p` is at the begining of the shared memory address space (see `lm_lmdiff`)
+	
 	// transform function parameters to limit their range
 	partransf(par, p);
 
 	// compute the difference " F = y - fun(X, par) " for all data points
     for(int x = -boxsize, idx = 0; x <= +boxsize; x++)
 		for(int y = -boxsize; y <= +boxsize; y++, idx++)
-            fvec[CID(idx)] = Y[CID(idx)] - gaussian((FLOAT)x, (FLOAT)y, p);
+            fvec[CID(idx)] = Y[CID(idx)] - gaussian((FLOAT)x, (FLOAT)y, p); // SQR?
 }
 
 
@@ -98,7 +98,8 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
 
     extern __shared__ FLOAT memory[];
     
-    FLOAT *dataY = memory;  // (FLOAT*)+1 is addition of the sizeof(FLOAT)!
+    // Note: (FLOAT*)+1 is addition of the sizeof(FLOAT)!
+    FLOAT *dataY = memory+ blockDim.x*DATAY_SIZE;   // here the addition os for shared temporary array `p` in function `evaluate`
     FLOAT *x     = dataY + blockDim.x*DATAY_SIZE;
     FLOAT *fvec  = x     + blockDim.x*DATAA_SIZE;
     FLOAT *diag  = fvec  + blockDim.x* FVEC_SIZE;

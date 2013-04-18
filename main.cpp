@@ -92,7 +92,7 @@ class CUDA
                 throw("cuModuleGetFunction");
     
             // Invokes the kernel f on a gridDimX x gridDimY x gridDimZ grid of blocks. Each block contains blockDimX x blockDimY x blockDimZ threads.
-            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 8*1248*FSIZE, NULL, args, NULL) != CUDA_SUCCESS)
+            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 12*1008*FSIZE, NULL, args, NULL) != CUDA_SUCCESS)  // BLOCK_SIZE = 1003*FSIZE; BLOCK_X = 12;
                 throw("cuLaunchKernel");
         }
 
@@ -190,14 +190,14 @@ class Gaussian2DFitting
             n_molecules = molecules;
             TransformForwardParams(par0);
 
-            // working in 1D ... there is only 48kB od shared memory per block, thus with arrays of length 1248,
-            // it is possible to run 4 threads with double precision (8B per item) or 8 threads with single precision (4B per item)
-            int blockX = 32 / FSIZE;
+            // working in 1D ... there is only 48kB od shared memory per block, thus with arrays of length 1003,
+            // it is possible to run 6 threads with double precision (8B per item) or 12 threads with single precision (4B per item)
+            int blockX = 48 / FSIZE;    // 48/4=12; 48/8=6;
             int nblocks = (n_molecules / blockX) + (int)(n_molecules % blockX > 0);    // --> ceil(n_molecules / blockX)
             // nmolmem = number of molecules in memory (including the ones used for padding)
             int nmolmem = n_molecules;
             if(n_molecules % blockX > 0)
-                nmolmem += 8 - (n_molecules % blockX);
+                nmolmem += blockX - (n_molecules % blockX);
 	        
             CUDA cuda;
             
@@ -286,7 +286,7 @@ FLOAT min(FLOAT *arr, int n)
 int main()
 {
     const int nparams = 5;  // {x,y,I,sigma,bkg}
-    const int molecules = 50000;
+    const int molecules = 500000;
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);
