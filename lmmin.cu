@@ -99,16 +99,16 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
     extern __shared__ FLOAT memory[];
     
     // Note: (FLOAT*)+1 is addition of the sizeof(FLOAT)!
-    FLOAT *dataY = memory+ blockDim.x*DATAY_SIZE;   // here the addition os for shared temporary array `p` in function `evaluate`
-    FLOAT *x     = dataY + blockDim.x*DATAY_SIZE;
-    FLOAT *fvec  = x     + blockDim.x*DATAA_SIZE;
-    FLOAT *diag  = fvec  + blockDim.x* FVEC_SIZE;
-    FLOAT *fjac  = diag  + blockDim.x* DIAG_SIZE;
-    FLOAT *qtf   = fjac  + blockDim.x* FJAC_SIZE;
-    FLOAT *wa1   = qtf   + blockDim.x*  QTF_SIZE;
-    FLOAT *wa2   = wa1   + blockDim.x*  WA1_SIZE;
-    FLOAT *wa3   = wa2   + blockDim.x*  WA2_SIZE;
-    FLOAT *wa4   = wa3   + blockDim.x*  WA3_SIZE;
+    FLOAT *dataY = memory + blockDim.x*DATAA_SIZE;   // here the addition os for shared temporary array `p` in function `evaluate`
+    FLOAT *x     = dataY  + blockDim.x*DATAY_SIZE;
+    FLOAT *fvec  = x      + blockDim.x*DATAA_SIZE;
+    FLOAT *diag  = fvec   + blockDim.x* FVEC_SIZE;
+    FLOAT *fjac  = diag   + blockDim.x* DIAG_SIZE;
+    FLOAT *qtf   = fjac   + blockDim.x* FJAC_SIZE;
+    FLOAT *wa1   = qtf    + blockDim.x*  QTF_SIZE;
+    FLOAT *wa2   = wa1    + blockDim.x*  WA1_SIZE;
+    FLOAT *wa3   = wa2    + blockDim.x*  WA2_SIZE;
+    FLOAT *wa4   = wa3    + blockDim.x*  WA3_SIZE;
     int *ipvt = (int *)(wa4 + blockDim.x*WA4_SIZE);
 
     // copy the input data from the slow global memory to the much faster shared memory

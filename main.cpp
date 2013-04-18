@@ -1,9 +1,8 @@
 /*
    TODO
-    - v metode evaluate udelat pole parametru shared! + size should be scalable with blockDim.x!
     - zmenit velikost BLOCK_SIZE a pri spousteni kernelu tam nemit tu velikost natvrdo!
+    - idealne 16 vlaken, protoze pry coalesced pristup potrebuje startovni adresy nasobky 64! POZOR!!: ted nevim...tyka se teda coalescing pouze globalni pameti??!! cetl jsem, neco, co mi naznacovalo, ze u shared by to nemel byt problem...?
     - zbavit se goto!
-    - tykaji se me bank conflicts? nejak jsem nepobral, co to ma byt
     - zkusit presunout ty dva cykly pro Y a A, co jsou ve funkci LMfit(main.cpp) do inicializace v lmdiff, cimz by to bylo asi cistsi, zejmena pak z javy
     - vyber nejlepsiho zarizeni s nejvice GFlops
     - mereni single, nebo double?
@@ -34,6 +33,7 @@
 #include "lmmin.cuh"
 
 #include <cuda.h>
+#include <cuda_runtime.h>
 #include <builtin_types.h>
 //#include <helper_cuda_drvapi.h>
 
@@ -80,7 +80,7 @@ class CUDA
             clean();
         }
 
-        void run(const char *module, const char *function, dim3 block, dim3 grid, void **args)
+        void run(const char *module, const char *function, dim3 block, dim3 grid, int sharedMemorySizeInBytes, void **args)
         {
             CUmodule cuModule;
             CUfunction cuLMmin;
@@ -90,9 +90,12 @@ class CUDA
     
             if(cuModuleGetFunction(&cuLMmin, cuModule, function) != CUDA_SUCCESS)
                 throw("cuModuleGetFunction");
+
+            if(cudaDeviceSetSharedMemConfig(CUDA_BANK_SIZE) != CUDA_SUCCESS)
+                throw("cudaDeviceSetSharedMemConfig");
     
             // Invokes the kernel f on a gridDimX x gridDimY x gridDimZ grid of blocks. Each block contains blockDimX x blockDimY x blockDimZ threads.
-            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, 12*1008*FSIZE, NULL, args, NULL) != CUDA_SUCCESS)  // BLOCK_SIZE = 1003*FSIZE; BLOCK_X = 12;
+            if(cuLaunchKernel(cuLMmin, grid.x, grid.y, grid.z, block.x, block.y, block.z, sharedMemorySizeInBytes, NULL, args, NULL) != CUDA_SUCCESS)
                 throw("cuLaunchKernel");
         }
 
@@ -198,6 +201,7 @@ class Gaussian2DFitting
             int nmolmem = n_molecules;
             if(n_molecules % blockX > 0)
                 nmolmem += blockX - (n_molecules % blockX);
+            int sharedMemorySizeInBytes = blockX*BLOCK_SIZE*FSIZE;
 	        
             CUDA cuda;
             
@@ -231,7 +235,7 @@ class Gaussian2DFitting
                              &control_gtol, &maxcall, &control_epsilon, &one, &control_stepbound };
 
             // run
-            cuda.run("bin/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), args);
+            cuda.run("bin/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), sharedMemorySizeInBytes, args);
 
             // Retrieve result from device and store it in host array
             cuMemcpyDtoH(tmpA, d_A, nmolmem*n_params*FSIZE);
@@ -286,7 +290,7 @@ FLOAT min(FLOAT *arr, int n)
 int main()
 {
     const int nparams = 5;  // {x,y,I,sigma,bkg}
-    const int molecules = 500000;
+    const int molecules = 50;
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);

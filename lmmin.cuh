@@ -2,20 +2,22 @@
 #define __LMMIN_CUH__
 
 // precision: float/double ...float is usually at least 8x faster than double, because number of double processing units is limited on the chip!
-#define DOUBLE_PRECISION 0
+#define DOUBLE_PRECISION 1
 
 #if DOUBLE_PRECISION == 1
-    #define LM_MACHEP     DBL_EPSILON   /* resolution of arithmetic */
-    #define LM_DWARF      DBL_MIN       /* smallest nonzero number */
-    #define LM_SQRT_DWARF sqrt(DBL_MIN) /* square should not underflow */
-    #define LM_SQRT_GIANT sqrt(DBL_MAX) /* square should not overflow */
-    #define FLOAT         double
+    #define LM_MACHEP      DBL_EPSILON   /* resolution of arithmetic */
+    #define LM_DWARF       DBL_MIN       /* smallest nonzero number */
+    #define LM_SQRT_DWARF  sqrt(DBL_MIN) /* square should not underflow */
+    #define LM_SQRT_GIANT  sqrt(DBL_MAX) /* square should not overflow */
+    #define FLOAT          double
+    #define CUDA_BANK_SIZE cudaSharedMemBankSizeEightByte
 #else
-    #define LM_MACHEP     FLT_EPSILON   /* resolution of arithmetic */
-    #define LM_DWARF      FLT_MIN       /* smallest nonzero number */
-    #define LM_SQRT_DWARF sqrt(FLT_MIN) /* square should not underflow */
-    #define LM_SQRT_GIANT sqrt(FLT_MAX) /* square should not overflow */
-    #define FLOAT         float
+    #define LM_MACHEP      FLT_EPSILON   /* resolution of arithmetic */
+    #define LM_DWARF       FLT_MIN       /* smallest nonzero number */
+    #define LM_SQRT_DWARF  sqrt(FLT_MIN) /* square should not underflow */
+    #define LM_SQRT_GIANT  sqrt(FLT_MAX) /* square should not overflow */
+    #define FLOAT          float
+    #define CUDA_BANK_SIZE cudaSharedMemBankSizeFourByte
 #endif
 
 /* If the above values do not work, the following seem good for an x86:
@@ -47,6 +49,7 @@
 #define WA4_SIZE n_input_data
 #define IPVT_SIZE n_params
 
-#define BLOCK_SIZE (DATAY_SIZE + DATAA_SIZE + FVEC_SIZE + DIAG_SIZE + QTF_SIZE + FJAC_SIZE + WA1_SIZE + WA2_SIZE + WA3_SIZE + WA4_SIZE + IPVT_SIZE)
+#define BLOCK_SIZE (DATAA_SIZE + DATAY_SIZE + DATAA_SIZE + FVEC_SIZE + DIAG_SIZE + QTF_SIZE + FJAC_SIZE + WA1_SIZE + WA2_SIZE + WA3_SIZE + WA4_SIZE + IPVT_SIZE)
+// --> first DATAA_SIZE is there for the `p` in function `evaluate`
 
 #endif // __LMMIN_CUH__
