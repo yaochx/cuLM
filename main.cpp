@@ -1,10 +1,7 @@
 /*
-   REPORT
-    - momentalni stav: nepada to a neco to dela...ovsem krome odhadu X jsou vsechno defaultni hodnoty
-      --> muj tip je, ze je spatne CID_BASE, protoze x je prvni parametr (prvni adresa je zrejme spravne), takze to asi nebude nahoda
-
    TODO
-    - funguje CID_BASE ve volani lmenorm tak, jak by mel?
+    - v metode evaluate udelat pole parametru shared! + size should be scalable with blockDim.x!
+    - zmenit velikost BLOCK_SIZE a pri spousteni kernelu tam nemit tu velikost natvrdo!
     - zbavit se goto!
     - tykaji se me bank conflicts? nejak jsem nepobral, co to ma byt
     - zkusit presunout ty dva cykly pro Y a A, co jsou ve funkci LMfit(main.cpp) do inicializace v lmdiff, cimz by to bylo asi cistsi, zejmena pak z javy
@@ -289,7 +286,7 @@ FLOAT min(FLOAT *arr, int n)
 int main()
 {
     const int nparams = 5;  // {x,y,I,sigma,bkg}
-    const int molecules = 9;
+    const int molecules = 50000;
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);

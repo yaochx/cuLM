@@ -61,30 +61,14 @@ __device__ void parinvtransf(FLOAT *parin, FLOAT *parout)
 __device__ void evaluate(FLOAT *par, int boxsize, FLOAT *fvec, FLOAT *Y)   // X is 'wired' in here [-boxsize:+boxsize]
 {
 	FLOAT p[8*5]; // TODO: shared! + size should be scalable with blockDim.x!
-    float par0 = par[CID(0)];
-    float par1 = par[CID(1)];
-    float par2 = par[CID(2)];
-    float par3 = par[CID(3)];
-    float par4 = par[CID(4)];
-    fvec[0] = par0+par1+par2+par3+par4;
 
 	// transform function parameters to limit their range
 	partransf(par, p);
-    float p0 = p[CID(0)];
-    float p1 = p[CID(1)];
-    float p2 = p[CID(2)];
-    float p3 = p[CID(3)];
-    float p4 = p[CID(4)];
-    fvec[1] = p0+p1+p2+p3+p4;
 
 	// compute the difference " F = y - fun(X, par) " for all data points
     for(int x = -boxsize, idx = 0; x <= +boxsize; x++)
 		for(int y = -boxsize; y <= +boxsize; y++, idx++)
-        {
-            int cid = CID(idx);
-            float yy = Y[cid];
-            fvec[cid] = Y[CID(idx)] - gaussian((FLOAT)x, (FLOAT)y, p);
-        }
+            fvec[CID(idx)] = Y[CID(idx)] - gaussian((FLOAT)x, (FLOAT)y, p);
 }
 
 
@@ -107,8 +91,8 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
     int TI = blockIdx.x * blockDim.x + threadIdx.x;
     if(TI >= TI_MAX) return;
 
-    // these two are here because of the macros in lmmin.cuh
     int m = SQR(1+2*boxsize);
+    // the following two are here because of the macros in lmmin.cuh
     int n_params = n;
     int n_input_data = m;
 
@@ -128,16 +112,10 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
 
     // copy the input data from the slow global memory to the much faster shared memory
     for(int i = 0; i < m; i++)
-    {
-        int cid = CID(i);
-        dataY[cid] = g_dataY[blockIdx.x*blockDim.x + CID(i)];
-    }
+        dataY[CID(i)] = g_dataY[blockIdx.x*blockDim.x*DATAY_SIZE + CID(i)];
 
     for(int i = 0; i < n; i++)
-    {
-        int cid = CID(i);
-        x[cid] = g_dataA[blockIdx.x*blockDim.x + CID(i)];
-    }
+        x[CID(i)] = g_dataA[blockIdx.x*blockDim.x*DATAA_SIZE + CID(i)];
 
 /*
  *   The purpose of lmdif is to minimize the sum of the squares of
@@ -537,7 +515,8 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
         {
             // save the results back into the global memory! unless I would not be able to read the results!
             for(int i = 0; i < n; i++)
-                g_dataA[blockIdx.x*blockDim.x + CID(i)] = x[CID(i)];
+                g_dataA[blockIdx.x*blockDim.x*DATAA_SIZE + CID(i)] = x[CID(i)];
+
 		    return;
         }
 
@@ -554,19 +533,10 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
 	    if (info != 0)
         {
             // save the results back into the global memory! unless I would not be able to read the results!
-            float x0 = x[CID(0)];
-            float x1 = x[CID(1)];
-            float x2 = x[CID(2)];
-            float x3 = x[CID(3)];
-            float x4 = x[CID(4)];
-            g_dataA[0] = x0+x1+x2+x3+x4;
-
             for(int i = 0; i < n; i++)
-            {
-                int cid = CID(i);
-                g_dataA[blockIdx.x*blockDim.x + cid] = x[CID(i)];
-            }
-		    return;
+                g_dataA[blockIdx.x*blockDim.x*DATAA_SIZE + CID(i)] = x[CID(i)];
+
+ 		    return;
         }
 
 /*** inner: end of the loop. repeat if iteration unsuccessful. ***/
