@@ -554,6 +554,13 @@ lm_lmdif(int TI_MAX, int boxsize, FLOAT *g_dataY, int n, FLOAT *g_dataA, FLOAT f
 	    if (info != 0)
         {
             // save the results back into the global memory! unless I would not be able to read the results!
+            float x0 = x[CID(0)];
+            float x1 = x[CID(1)];
+            float x2 = x[CID(2)];
+            float x3 = x[CID(3)];
+            float x4 = x[CID(4)];
+            g_dataA[0] = x0+x1+x2+x3+x4;
+
             for(int i = 0; i < n; i++)
             {
                 int cid = CID(i);

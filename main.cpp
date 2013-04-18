@@ -6,6 +6,7 @@
    TODO
     - funguje CID_BASE ve volani lmenorm tak, jak by mel?
     - zbavit se goto!
+    - tykaji se me bank conflicts? nejak jsem nepobral, co to ma byt
     - zkusit presunout ty dva cykly pro Y a A, co jsou ve funkci LMfit(main.cpp) do inicializace v lmdiff, cimz by to bylo asi cistsi, zejmena pak z javy
     - vyber nejlepsiho zarizeni s nejvice GFlops
     - mereni single, nebo double?
@@ -13,7 +14,7 @@
     - vytvorit tagy u verzi, kde se merilo
     - pripadne vytvorit branch pro predchozi mereni bez pouziti shared pameti - uz ted totiz vim, ze jsem se nemusel tolik omezovat a v bloku mohlo byt vlaken hafo...
       --> najit nejlepsi pomer bloky/vlakna zvlast pro float a double a provest mereni
-          --> pridat jeste navic coalescing, pokud to ma u globalni pameti vubec vliv..?
+          --> pridat jeste navic coalescing - i u globalni pameti to ma vliv
           --> zkusit prepnout vic pameti do L1 cache, jak je napsano zde: https://developer.nvidia.com/content/using-shared-memory-cuda-cc, napr. cudaFuncCachePreferL1
               --> podobne bych tomhle mohl zkusit hejbat u shared verze...staci spocitat, kolik potrebuju bajtu na lokalni promenny a volani funkci a dat to k dispozici pres L1
 
@@ -236,7 +237,7 @@ class Gaussian2DFitting
             cuda.run("bin/lmmin.ptx", "lmmin", dim3(blockX,1,1), dim3(nblocks,1,1), args);
 
             // Retrieve result from device and store it in host array
-            cuMemcpyDtoH(tmpA, d_A, n_molecules*n_params*FSIZE);
+            cuMemcpyDtoH(tmpA, d_A, nmolmem*n_params*FSIZE);
             
             FLOAT **results = (FLOAT**)malloc(n_molecules*sizeof(FLOAT*));
             for(int m = 0; m < n_molecules; m++)
@@ -288,7 +289,7 @@ FLOAT min(FLOAT *arr, int n)
 int main()
 {
     const int nparams = 5;  // {x,y,I,sigma,bkg}
-    const int molecules = 1;
+    const int molecules = 9;
 	const int fitregionsize = 11;
 	const int boxsize = fitregionsize / 2;
 	const int fitregionsize2 = SQR(fitregionsize);
